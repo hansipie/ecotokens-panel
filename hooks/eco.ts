@@ -221,13 +221,15 @@ export function ecoLog(out: { savings: string; totals: string; jev: string }, no
   }
 }
 
+export const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
+
 export function ecoError(error: unknown, now: number): EcoLog {
   return {
     savings: [],
     jev: [],
     totalSaved: 0,
     totalFiltered: 0,
-    error: error instanceof Error ? error.message : String(error),
+    error: message(error),
     measuredAt: now,
   }
 }

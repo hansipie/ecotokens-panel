@@ -23,7 +23,7 @@ import {
 } from './agents'
 import type { InFlightTask } from './agents'
 import { cells, gradient } from './bar'
-import { callKey, ecoError, ecoLog, ecoMarkQuery, ecoQueries, groupLine, kTokens, markLine, matchMarks, parseRows, stamp, turnLine, MATCH_LEAD_MS } from './eco'
+import { callKey, ecoError, ecoLog, ecoMarkQuery, ecoQueries, groupLine, kTokens, markLine, matchMarks, message, parseRows, stamp, turnLine, MATCH_LEAD_MS } from './eco'
 import type { EcoQuery, MarkRow } from './eco'
 import { GAIN_PERIODS, PURPOSE_LABELS, gainCommand, jevCommand, parseGain, parseJev, sparkline } from './gain'
 import { HANDOFF_LIST, HANDOFF_STATUS, handoffToggle, parseHandoff, parseHandoffList } from './handoff'
@@ -168,11 +168,38 @@ async function runSetting($: EngineInterface, command: 'model' | 'effort', value
   }
 }
 
-async function runQuery($: EngineInterface, q: EcoQuery) {
-  const ran = await $.process.run(q.argv, { timeoutMs: 5_000 })
-  if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || `sqlite3 a échoué (${ran.exitCode})`)
+// A command's output; a non-zero exit is an error carrying its stderr.
+async function output($: EngineInterface, argv: string[], timeoutMs: number, what = argv.slice(0, 2).join(' ')) {
+  const ran = await $.process.run(argv, { timeoutMs })
+  if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || `${what} a échoué (${ran.exitCode})`)
 
   return ran.stdout
+}
+
+// What a tab adds when it can: the command's output, or undefined when it fails in any way.
+async function extra($: EngineInterface, argv: string[], cwd?: string) {
+  try {
+    const ran = await $.process.run(argv, { cwd, timeoutMs: 5_000 })
+    return ran.exitCode === 0 ? ran.stdout : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Runs a control command and says in a toast how it went; true when it succeeded.
+async function control($: EngineInterface, what: string, argv: string[], timeoutMs: number, done: string, cwd?: string) {
+  try {
+    const ran = await $.process.run(argv, { cwd, timeoutMs })
+    $.ui.toast(ran.exitCode === 0 ? done : `${what} : ${ran.stderr.trim() || `échec (${ran.exitCode})`}`)
+    return ran.exitCode === 0
+  } catch (error) {
+    $.ui.toast(`${what} : ${message(error)}`)
+    return false
+  }
+}
+
+function runQuery($: EngineInterface, q: EcoQuery) {
+  return output($, q.argv, 5_000, 'sqlite3')
 }
 
 async function refreshEco($: EngineInterface) {
@@ -257,17 +284,13 @@ async function logEcoTurn($: EngineInterface) {
 async function refreshHandoff($: EngineInterface) {
   let state: HandoffState | null = null
   try {
-    const ran = await $.process.run(HANDOFF_STATUS, { timeoutMs: 5_000 })
-    if (ran.exitCode === 0) state = parseHandoff(ran.stdout, await $.clock.now())
+    const status = await extra($, HANDOFF_STATUS)
+    if (status !== undefined) state = parseHandoff(status, await $.clock.now())
     if (state) {
-      // The list is a bonus of the bonus: without it the status still shows.
-      try {
-        const cwd = await $.session.cwd()
-        const listed = await $.process.run(HANDOFF_LIST, { cwd, timeoutMs: 5_000 })
-        if (listed.exitCode === 0) state = { ...state, entries: parseHandoffList(listed.stdout, cwd) }
-      } catch {
-        // entries stay empty
-      }
+      // The list is a bonus of the bonus: without it the status still shows, entries empty.
+      const cwd = await $.session.cwd()
+      const listed = await extra($, HANDOFF_LIST, cwd)
+      if (listed !== undefined) state = { ...state, entries: parseHandoffList(listed, cwd) }
     }
   } catch {
     // Left empty: the panel shows that the state could not be read.
@@ -276,12 +299,7 @@ async function refreshHandoff($: EngineInterface) {
 }
 
 async function runHandoff($: EngineInterface, argv: string[], done: string) {
-  try {
-    const ran = await $.process.run(argv, { timeoutMs: 15_000 })
-    $.ui.toast(ran.exitCode === 0 ? done : `handoff : ${ran.stderr.trim() || `échec (${ran.exitCode})`}`)
-  } catch (error) {
-    $.ui.toast(`handoff : ${error instanceof Error ? error.message : String(error)}`)
-  }
+  await control($, 'handoff', argv, 15_000, done)
   await refreshHandoff($)
 }
 
@@ -292,18 +310,13 @@ async function runHandoffSkill($: EngineInterface) {
     await $.command.run({ command: 'handoff', args: '' })
     $.ui.toast('/handoff lancé : la session prépare le handoff.')
   } catch (error) {
-    $.ui.toast(`handoff : ${error instanceof Error ? error.message : String(error)}`)
+    $.ui.toast(`handoff : ${message(error)}`)
   }
 }
 
 async function report<T>($: EngineInterface, argv: string[], parse: (stdout: string) => T) {
-  const ran = await $.process.run(argv, { timeoutMs: 10_000 })
-  if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || `${argv.slice(0, 2).join(' ')} a échoué (${ran.exitCode})`)
-
-  return parse(ran.stdout)
+  return parse(await output($, argv, 10_000))
 }
-
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 // `ecotokens gain` and `ecotokens jev` over the chosen period, for this workspace only, each on its own.
 async function refreshGain($: EngineInterface) {
@@ -332,15 +345,10 @@ async function refreshWatch($: EngineInterface) {
     const cwd = await $.session.cwd()
     const ran = await $.process.run(WATCH_STATUS, { timeoutMs: 5_000 })
     state = parseWatch(ran.stdout, ran.exitCode === 0, cwd, await $.clock.now())
+    // Without its tail the log stays empty.
     const logFile = state.current?.logFile
-    if (logFile) {
-      try {
-        const tail = await $.process.run(watchLogTail(logFile), { timeoutMs: 5_000 })
-        if (tail.exitCode === 0) state = { ...state, log: parseLogTail(tail.stdout) }
-      } catch {
-        // log stays empty
-      }
-    }
+    const tail = logFile ? await extra($, watchLogTail(logFile)) : undefined
+    if (tail !== undefined) state = { ...state, log: parseLogTail(tail) }
   } catch {
     // Left empty: the tab shows that the state could not be read.
   }
@@ -349,20 +357,10 @@ async function refreshWatch($: EngineInterface) {
 
 // The daemon registers itself just after `--background` returns: wait a moment before reading.
 async function runWatch($: EngineInterface, start: boolean) {
-  try {
-    const cwd = await $.session.cwd()
-    const ran = await $.process.run(start ? watchStart(cwd) : watchStop(cwd), { cwd, timeoutMs: 15_000 })
-    $.ui.toast(
-      ran.exitCode === 0
-        ? start
-          ? 'Watch démarré.'
-          : 'Watch arrêté.'
-        : `watch : ${ran.stderr.trim() || `échec (${ran.exitCode})`}`,
-    )
-    if (start && ran.exitCode === 0) await $.clock.sleep(800)
-  } catch (error) {
-    $.ui.toast(`watch : ${error instanceof Error ? error.message : String(error)}`)
-  }
+  const cwd = await $.session.cwd()
+  const argv = start ? watchStart(cwd) : watchStop(cwd)
+  const isDone = await control($, 'watch', argv, 15_000, start ? 'Watch démarré.' : 'Watch arrêté.', cwd)
+  if (start && isDone) await $.clock.sleep(800)
   await refreshWatch($)
 }
 
@@ -1276,7 +1274,7 @@ export const register: Register = (on, options) => {
       try {
         return drawTab()
       } catch (error) {
-        return <Text color="error">Affichage impossible : {error instanceof Error ? error.message : String(error)} (↻ pour relire)</Text>
+        return <Text color="error">Affichage impossible : {message(error)} (↻ pour relire)</Text>
       }
     }
 
