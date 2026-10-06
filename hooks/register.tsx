@@ -1,10 +1,30 @@
-import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionContextBreakdown, SessionUsage } from 'claude-code'
+import { atom, memberOf, read, update } from 'claude-code'
+import type { AgentInfo, EngineInterface, Register, SessionContextBreakdown, SessionUsage, Timer, ToolCallInput } from 'claude-code'
 
-import type { ContextDetail, EcoLog, GainPeriod, GainState, HandoffState, TabId, UsageSnapshot, WatchState } from '../types'
+import type { AgentRow, AgentsState, TaskRow, ContextDetail, EcoLog, EcoMark, EcoTrack, EffortLevel, GainPeriod, GainState, HandoffState, TabId, UsageSnapshot, WatchState } from '../types'
+import {
+  AGENT_STATUS,
+  TASK_STATUS,
+  elapsedLabel,
+  isActive,
+  isTaskActive,
+  mergeListed,
+  pruneEnded,
+  reconcileTasks,
+  recordSpawn,
+  recordTaskStart,
+  recordTaskStop,
+  recordToolUse,
+  recordTurn,
+  shortModel,
+  taskElapsedLabel,
+  taskFromCall,
+  taskKindLabel,
+} from './agents'
+import type { InFlightTask } from './agents'
 import { cells, gradient } from './bar'
-import { ecoError, ecoLog, ecoQueries } from './eco'
-import type { EcoQuery } from './eco'
+import { callKey, ecoError, ecoLog, ecoMarkQuery, ecoQueries, groupLine, kTokens, markLine, matchMarks, parseRows, stamp, turnLine, MATCH_LEAD_MS } from './eco'
+import type { EcoQuery, MarkRow } from './eco'
 import { GAIN_PERIODS, PURPOSE_LABELS, gainCommand, jevCommand, parseGain, parseJev, sparkline } from './gain'
 import { HANDOFF_LIST, HANDOFF_STATUS, handoffToggle, parseHandoff, parseHandoffList } from './handoff'
 import { WATCH_STATUS, parseLogTail, parseWatch, watchLogTail, watchStart, watchStop } from './watch'
@@ -17,10 +37,19 @@ const tab = atom({ plugin: 'ecotokens-panel', key: 'tab' } as const, 'session' a
 const usage = atom({ plugin: 'ecotokens-panel', key: 'usage' } as const, null as UsageSnapshot | null)
 const context = atom({ plugin: 'ecotokens-panel', key: 'context' } as const, null as ContextDetail | null)
 const eco = atom({ plugin: 'ecotokens-panel', key: 'eco' } as const, null as EcoLog | null)
+// What the transcript shows live: the saving of each tool call (one value per tool_use_id, so only its row redraws),
+// the calls still waiting for their row, and when the last turn line was drawn.
+const ecoMark = atom({ plugin: 'ecotokens-panel', key: 'ecoMark' } as const, null as EcoMark | null)
+const ecoTrack = atom({ plugin: 'ecotokens-panel', key: 'ecoTrack' } as const, { calls: [], claimed: [] } as EcoTrack)
+const ecoSeen = atom({ plugin: 'ecotokens-panel', key: 'ecoSeen' } as const, 0)
 const handoff = atom({ plugin: 'ecotokens-panel', key: 'handoff' } as const, null as HandoffState | null)
 const gainPeriod = atom({ plugin: 'ecotokens-panel', key: 'gainPeriod' } as const, 'today' as GainPeriod)
 const gain = atom({ plugin: 'ecotokens-panel', key: 'gain' } as const, null as GainState | null)
 const watch = atom({ plugin: 'ecotokens-panel', key: 'watch' } as const, null as WatchState | null)
+const model = atom({ plugin: 'ecotokens-panel', key: 'model' } as const, null as string | null)
+const effort = atom({ plugin: 'ecotokens-panel', key: 'effort' } as const, null as EffortLevel | null)
+const effortOptions = atom({ plugin: 'ecotokens-panel', key: 'effortOptions' } as const, null as string[] | null)
+const agents = atom({ plugin: 'ecotokens-panel', key: 'agents' } as const, null as AgentsState | null)
 
 // Add a tab here, then a case in drawTab().
 const TABS: { id: TabId; label: string }[] = [
@@ -29,7 +58,12 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'eco', label: 'Ecotokens' },
   { id: 'gain', label: 'Gains' },
   { id: 'watch', label: 'Watch' },
+  { id: 'agents', label: 'Background' },
 ]
+
+// The model buttons, cheapest first. The effort buttons offer EFFORTS until /config says otherwise.
+const MODELS = ['haiku', 'sonnet', 'opus', 'fable']
+const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
 const WINDOW_LABELS: Record<string, string> = {
   five_hour: 'Session (5 h)',
@@ -90,9 +124,48 @@ async function refresh($: EngineInterface) {
   await update($, usage, () => snapshot(u, now))
   const b = u.context.breakdown
   if (b) await update($, context, () => detail(b, now))
+  await refreshModel($)
+  await refreshChoices($)
   await refreshEco($)
   await refreshHandoff($)
   await refreshWatch($)
+  await refreshAgents($)
+}
+
+async function refreshModel($: EngineInterface) {
+  try {
+    const current = await $.session.model()
+    await update($, model, () => current)
+  } catch {
+    // Left empty: no button is marked as current.
+  }
+}
+
+// The /config menu's effort row gives the levels this session offers and the current one.
+// An absent or empty row leaves the list to EFFORTS, the effort to the last choice.
+async function refreshChoices($: EngineInterface) {
+  try {
+    const rows = await $.config.list()
+    const row = rows.find(r => r.key === 'effort' && r.kind === 'choice')
+    const e = row?.options?.length ? row : undefined
+    await update($, effortOptions, () => (e?.options ? [...e.options] : null))
+    if (e && typeof e.value === 'string' && e.options?.includes(e.value)) await update($, effort, () => e.value as EffortLevel)
+  } catch {
+    // Left as it was: the fallback list stays on screen.
+  }
+}
+
+// Runs /model or /effort as if typed. The engine has no setter for either:
+// the effort shown is the one /config reports, else the last one chosen from here.
+async function runSetting($: EngineInterface, command: 'model' | 'effort', value: string) {
+  try {
+    await $.command.run({ command, args: value })
+    if (command === 'effort') await update($, effort, () => value as EffortLevel)
+    await refreshModel($)
+    $.ui.toast(`/${command} ${value}`)
+  } catch (error) {
+    $.ui.toast(`${command} : ${message(error)}`)
+  }
 }
 
 async function runQuery($: EngineInterface, q: EcoQuery) {
@@ -118,6 +191,66 @@ async function refreshEco($: EngineInterface) {
     log = ecoError(error, await $.clock.now())
   }
   await update($, eco, () => log)
+}
+
+// The databases the live lines read: without ecotokens there is nothing to draw, and nothing is run.
+async function ecoDir($: EngineInterface) {
+  const home = (await $.env.get('HOME')) ?? ''
+
+  return (await $.fs.exists(`${home}/.config/ecotokens/metrics.db`)) ? home : undefined
+}
+
+// A tool call that has finished waits for the row ecotokens wrote for it.
+async function trackEcoCall($: EngineInterface, e: ToolCallInput, startedAt: number) {
+  const key = callKey(String(e.tool), e as Record<string, unknown>)
+  if (!key || !e.tool_use_id) return
+  const call = { id: e.tool_use_id, key, startedAt, endedAt: await $.clock.now() }
+  await update($, ecoTrack, t => ({ ...t, calls: [...t.calls, call].slice(-50) }))
+  await matchEco($)
+  // A row written after the call (a read's summary) lands a little later.
+  if ((await read($, ecoTrack)).calls.some(c => c.id === call.id)) $.clock.after(4_000, () => void matchEco($))
+}
+
+// Gives each waiting call its row, and marks the tool row it belongs to.
+// The lines are a bonus: whatever fails (no ecotokens, no sqlite3) leaves the transcript as it was.
+async function matchEco($: EngineInterface) {
+  try {
+    const waiting = (await read($, ecoTrack)).calls
+    const home = waiting.length > 0 ? await ecoDir($) : undefined
+    if (home === undefined) return
+    const since = Math.min(...waiting.map(c => c.startedAt)) - MATCH_LEAD_MS
+    const rows = parseRows<MarkRow>(await runQuery($, ecoMarkQuery(home, since, await $.session.cwd())))
+    const now = await $.clock.now()
+    let found: ReturnType<typeof matchMarks>['marks'] = []
+    // Matched on what the state holds now: a call tracked meanwhile is not lost, and no row is given twice.
+    await update($, ecoTrack, t => {
+      const matched = matchMarks(t, rows, now)
+      found = matched.marks
+
+      return matched.track
+    })
+    for (const { id, mark } of found) await update($, memberOf(ecoMark, { requestId: id }), () => mark)
+  } catch {
+    // Left as it was: the next call or turn tries again.
+  }
+}
+
+// After a turn of the main conversation: what ecotokens saved and what Jev decided since the last one.
+async function logEcoTurn($: EngineInterface) {
+  try {
+    const home = await ecoDir($)
+    if (home === undefined) return
+    const { startedAt } = await $.session.usage()
+    const now = await $.clock.now()
+    const since = Math.max(await read($, ecoSeen), startedAt)
+    await update($, ecoSeen, () => now)
+    const q = ecoQueries(home, since, await $.session.cwd())
+    const [totals, jev] = await Promise.all([runQuery($, q.totals), runQuery($, q.jev)])
+    const line = turnLine(ecoLog({ savings: '', totals, jev }, now))
+    if (line) $.ui.log(line)
+  } catch {
+    // No line for this turn.
+  }
 }
 
 // The handoff panel is a bonus too: without ecotokens it just says so.
@@ -233,6 +366,82 @@ async function runWatch($: EngineInterface, start: boolean) {
   await refreshWatch($)
 }
 
+// The session's subagents and teammates: `$.agent.list()` joined with what the hooks below saw.
+async function refreshAgents($: EngineInterface) {
+  const now = await $.clock.now()
+  let listed: AgentInfo[]
+  try {
+    listed = await $.agent.list()
+  } catch (error) {
+    await update($, agents, s => ({ rows: s?.rows ?? [], tasks: s?.tasks, error: message(error), measuredAt: now }))
+    return
+  }
+  // Nothing runs and nothing changed (nothing ended long enough ago to leave): no redraw.
+  const prev = await read($, agents)
+  const kept = pruneEnded({ rows: mergeListed(prev?.rows ?? [], listed, now), tasks: prev?.tasks ?? [] }, now)
+  const isIdle = !kept.rows.some(r => isActive(r.status)) && !kept.tasks.some(t => isTaskActive(t.status))
+  const isSame = JSON.stringify(kept.rows) === JSON.stringify(prev?.rows) && kept.tasks.length === (prev?.tasks ?? []).length
+  if (prev && !prev.error && isIdle && isSame) return
+  await update($, agents, s => ({
+    ...pruneEnded({ rows: mergeListed(s?.rows ?? [], listed, now), tasks: s?.tasks ?? [] }, now),
+    measuredAt: now,
+  }))
+}
+
+// Changes the row of one agent the tab already holds; an id it does not hold (a workflow's agent,
+// an engine fork such as compaction) is left out, and nothing is written.
+async function changeAgent($: EngineInterface, id: string, change: (rows: AgentRow[], now: number) => AgentRow[]) {
+  const known = await read($, agents)
+  if (!known?.rows.some(r => r.id === id)) return
+  const now = await $.clock.now()
+  await update($, agents, s => ({ rows: change(s?.rows ?? [], now), tasks: s?.tasks, error: s?.error, measuredAt: now }))
+}
+
+// Changes the background tasks, beside the agents.
+async function changeTasks($: EngineInterface, change: (tasks: TaskRow[], s: AgentsState | null, now: number) => TaskRow[]) {
+  const now = await $.clock.now()
+  await update($, agents, s => ({ rows: s?.rows ?? [], tasks: change(s?.tasks ?? [], s, now), error: s?.error, measuredAt: now }))
+}
+
+// A Stop event's list of the background work still in flight: the tasks it no longer names have ended.
+// Absent (an engine that does not say), nothing is concluded.
+async function reconcileInFlight($: EngineInterface, inFlight: readonly InFlightTask[] | undefined) {
+  if (!inFlight) return
+  const known = await read($, agents)
+  if (!inFlight.length && !(known?.tasks ?? []).some(t => isTaskActive(t.status))) return
+  await changeTasks($, (tasks, s, now) => reconcileTasks(tasks, [...inFlight], new Set((s?.rows ?? []).map(r => r.id)), now))
+}
+
+// Elapsed times move while an agent runs: the tab re-reads the list every 2 s while it is shown.
+// The timer is no state: a reload drops it, and the next spawn, run end, ↻ or tab press restarts it.
+const AGENTS_TICK_MS = 2_000
+let agentsTicker: Timer | undefined
+
+function watchAgents($: EngineInterface) {
+  agentsTicker?.cancel()
+  agentsTicker = $.clock.every(AGENTS_TICK_MS, () => void tickAgents($))
+}
+
+async function tickAgents($: EngineInterface) {
+  try {
+    if ((await read($, tab)) === 'agents' && (await isPaneOpen($))) {
+      await refreshAgents($)
+      return
+    }
+  } catch {
+    // The next tick tries again.
+    return
+  }
+  agentsTicker?.cancel()
+  agentsTicker = undefined
+}
+
+async function refreshAgentsIfShown($: EngineInterface) {
+  if ((await read($, tab)) !== 'agents' || !(await isPaneOpen($))) return
+  await refreshAgents($)
+  watchAgents($)
+}
+
 // Reads ecotokens' databases only while its tab is the one on screen.
 async function refreshEcoIfShown($: EngineInterface) {
   if ((await read($, tab)) === 'eco' && (await isPaneOpen($))) await refreshEco($)
@@ -250,14 +459,11 @@ async function toggle($: EngineInterface) {
   await refresh($)
   const opened = await $.ui.open({ id: PANE, title: TITLE, columns: PANE_COLUMNS })
   if (!opened.isPlaced) $.ui.toast(`ecotokens-panel : ${opened.reason}`)
+  else if ((await read($, tab)) === 'agents') watchAgents($)
 }
 
 function levelColor(percent: number) {
   return gradient(percent / 100)
-}
-
-function kTokens(n: number) {
-  return n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : String(n)
 }
 
 function pct(part: number, whole: number) {
@@ -274,9 +480,8 @@ function square(fullness: number, isFilled: boolean) {
   return fullness >= 0.7 ? '⛁' : '⛀'
 }
 
-// ecotokens stamps nanoseconds; Date reads milliseconds.
 function clock(iso: string) {
-  const d = new Date(iso.replace(/(\.\d{3})\d+/, '$1'))
+  const d = new Date(stamp(iso))
   const two = (n: number) => String(n).padStart(2, '0')
 
   return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`
@@ -298,7 +503,10 @@ function untilReset(resetsAt: string | undefined, now: number) {
   return `réinit. dans ${parts}`
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  // The lines under tool results and at the end of a turn: off with the `liveTranscript` option of /config.
+  const live = options.liveTranscript !== false
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'panel',
@@ -328,16 +536,35 @@ export const register: Register = on => {
   })
 
   // ecotokens writes its rows from the tool hooks and the prompt router.
+  // A call made in an agent's loop (`e.agentId`) counts on that agent's row.
   on('tool.call', async ($, e, next) => {
+    const startedAt = await $.clock.now()
     const ran = await next(e)
+    const id = e.agentId
+    if (id) await changeAgent($, id, rows => recordToolUse(rows, id, String(e.tool)))
+    // A Bash run in the background or a Monitor starts a task; TaskStop stops one.
+    if (!ran.deny && !ran.isError) {
+      const now = await $.clock.now()
+      const task = taskFromCall(String(e.tool), e as Record<string, unknown>, ran.result, now, id)
+      if (task) await changeTasks($, tasks => recordTaskStart(tasks, task))
+      const stopped = e.tool === 'TaskStop' ? (ran.result as { task_id?: unknown } | undefined)?.task_id : undefined
+      if (typeof stopped === 'string') await changeTasks($, (tasks, _s, at) => recordTaskStop(tasks, stopped, at))
+    }
     await refreshEcoIfShown($)
+    if (live && !ran.deny && !ran.isError) await trackEcoCall($, e, startedAt)
 
     return ran
   })
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
+    // In a subagent's or a teammate's loop, each run is one turn: what it cost and how it ended.
+    const id = e.agentId
+    if (id) await changeAgent($, id, (rows, now) => recordTurn(rows, { ...e, agentId: id }, now))
+    await refreshAgentsIfShown($)
     await refreshEcoIfShown($)
+    if (live) await matchEco($)
+    if (live && !id) await logEcoTurn($)
     const shown = await read($, tab)
     if (shown === 'session' && (await isPaneOpen($))) await refreshHandoff($)
     if (shown === 'watch' && (await isPaneOpen($))) await refreshWatch($)
@@ -345,6 +572,74 @@ export const register: Register = on => {
 
     return done
   })
+
+  // The classic Stop events carry the background work still in flight: the main loop's and a subagent's.
+  on('classic.Stop', async ($, e, next) => {
+    const done = await next(e)
+    await reconcileInFlight($, e.background_tasks)
+
+    return done
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    const done = await next(e)
+    await reconcileInFlight($, e.background_tasks)
+
+    return done
+  })
+
+  // Each subagent or teammate the session starts: its id, its model and when it started.
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    const id = started.agentId
+    if (id) {
+      const now = await $.clock.now()
+      await update($, agents, s => ({
+        rows: recordSpawn(s?.rows ?? [], e, { agentId: id, model: started.model }, now),
+        tasks: s?.tasks,
+        error: s?.error,
+        measuredAt: now,
+      }))
+      await refreshAgentsIfShown($)
+    }
+
+    return started
+  })
+
+  if (live) {
+    // Under a tool result, what ecotokens saved on that call.
+    on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+      const mark = await read($, memberOf(ecoMark, e))
+      if (!mark) return next(e)
+      const { Box, Text } = $.ui.resolve(e)
+
+      return (
+        <Box flexDirection="column">
+          {await next(e)}
+          <Text dimColor>{`  ${markLine(mark)}`}</Text>
+        </Box>
+      )
+    })
+
+    // A folded run of calls draws no result of its own: one line for what ecotokens saved on the run.
+    on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+      if (e.props.isExpanded) return next(e)
+      const marks: EcoMark[] = []
+      for (const call of e.props.calls) {
+        const mark = call.tool_use_id ? await read($, memberOf(ecoMark, { requestId: call.tool_use_id })) : null
+        if (mark) marks.push(mark)
+      }
+      if (marks.length === 0) return next(e)
+      const { Box, Text } = $.ui.resolve(e)
+
+      return (
+        <Box flexDirection="column">
+          {await next(e)}
+          <Text dimColor>{`  ${groupLine(marks)}`}</Text>
+        </Box>
+      )
+    })
+  }
 
   // The footer button, beside the engine's own mode labels.
   on('ui.render', { component: 'SessionMode' }, async ($, e) => {
@@ -368,13 +663,18 @@ export const register: Register = on => {
     const handoffState = await read($, handoff)
     const watchState = await read($, watch)
     const gainState = await read($, gain)
+    const modelName = await read($, model)
+    const currentEffort = await read($, effort)
+    const efforts = (await read($, effortOptions)) ?? EFFORTS
+    // Read only while shown: each tool call of an agent changes it, and the other tabs need no redraw.
+    const agentsState = current === 'agents' ? await read($, agents) : null
     const sessionId = await $.session.id()
     const now = await $.clock.now()
     const width = Math.max(10, e.props.bodyColumns - 2)
     const barWidth = Math.max(8, width - 8)
 
     const tabBar = (
-      <Box flexDirection="row" gap={1}>
+      <Box flexDirection="row" flexWrap="wrap" gap={1}>
         {TABS.map((t, i) => (
           <Button
             key={`tab-${t.id}`}
@@ -386,6 +686,10 @@ export const register: Register = on => {
               if (t.id === 'eco') await refreshEco($)
               if (t.id === 'watch') await refreshWatch($)
               if (t.id === 'gain') await refreshGain($)
+              if (t.id === 'agents') {
+                await refreshAgents($)
+                watchAgents($)
+              }
             }}
           />
         ))}
@@ -398,6 +702,7 @@ export const register: Register = on => {
           onPress={async () => {
             await refresh($)
             if (current === 'gain') await refreshGain($)
+            if (current === 'agents') watchAgents($)
           }}
         />
         <Button key="close" role="dismiss" plain dimColor label="✕" onPress={() => void $.ui.close({ id: PANE })} />
@@ -435,9 +740,12 @@ export const register: Register = on => {
           </Text>
           {meter('Utilisé', u.contextPercent, ctxDetail)}
 
-          <Text color="claude" bold>
-            Quota de l'abonnement
-          </Text>
+          <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            <Text color="claude" bold>
+              Quota de l'abonnement
+            </Text>
+            {u.costUsd !== undefined && <Text dimColor>· Coût équivalent API : ${u.costUsd.toFixed(2)}</Text>}
+          </Box>
           {u.rateLimits.length === 0 ? (
             <Box marginBottom={1}>
               <Text dimColor>Pas encore de relevé (il arrive avec la prochaine réponse du modèle).</Text>
@@ -446,10 +754,6 @@ export const register: Register = on => {
             u.rateLimits.map(r =>
               meter(WINDOW_LABELS[r.kind] ?? r.kind, r.percentUsed, untilReset(r.resetsAt, now)),
             )
-          )}
-
-          {u.costUsd !== undefined && (
-            <Text dimColor>Coût équivalent API : ${u.costUsd.toFixed(2)}</Text>
           )}
         </Box>
       )
@@ -523,8 +827,43 @@ export const register: Register = on => {
       }
     }
 
+    // A row of buttons: the primary one is the current value, the others light up under the pointer.
+    const choice = (
+      title: string,
+      values: readonly string[],
+      current: string | null | undefined,
+      command: 'model' | 'effort',
+    ) => (
+      <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1}>
+        {section(title)}
+        {values.map(v => (
+          <Button
+            key={`${command}-${v}`}
+            variant={v === current ? 'primary' : 'secondary'}
+            label={v}
+            hover={{ scope: `${command}-${v}`, color: 'claude', bold: true, underline: true }}
+            onPress={() => void runSetting($, command, v)}
+          />
+        ))}
+      </Box>
+    )
+
+    // Model and effort of the session: /model and /effort run as if typed.
+    const settingsZone = () => {
+      const currentModel = modelName
+      const alias = MODELS.find(m => currentModel?.toLowerCase().includes(m.toLowerCase()))
+      return (
+        <Box flexDirection="column" gap={1}>
+          {choice('Modèle', MODELS, alias, 'model')}
+          {choice('Effort', efforts, currentEffort, 'effort')}
+          {currentModel && <Text dimColor wrap="truncate-end">{currentModel}</Text>}
+        </Box>
+      )
+    }
+
     const sessionTab = () => (
       <Box flexDirection="column" gap={1}>
+        {settingsZone()}
         {usageSection()}
         <Box flexDirection="column">
           {section('Handoff')}
@@ -810,8 +1149,114 @@ export const register: Register = on => {
       )
     }
 
+    const agentRow = (r: AgentRow) => {
+      const s = AGENT_STATUS[r.status] ?? AGENT_STATUS.pending
+      const running = isActive(r.status)
+      const kind = [
+        r.name ? r.type : '',
+        r.isTeammate ? 'coéquipier' : r.isBackground ? 'arrière-plan' : '',
+        r.model ? shortModel(r.model) : '',
+      ]
+      const facts = [
+        elapsedLabel(r, now),
+        `${r.toolUses} outil${r.toolUses > 1 ? 's' : ''}${running && r.lastTool ? ` (${r.lastTool})` : ''}`,
+        r.inputTokens + r.outputTokens > 0 ? `${kTokens(r.inputTokens)} → ${kTokens(r.outputTokens)} tokens` : '',
+      ]
+
+      return (
+        <Box flexDirection="column" marginBottom={1}>
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text bold={running} dimColor={!running && r.status !== 'idle'} wrap="truncate-end">
+              {r.parentId ? '↳ ' : ''}
+              {r.name ?? r.type}
+            </Text>
+            <Text color={s.color}>
+              {s.glyph} {s.label}
+            </Text>
+          </Box>
+          <Text wrap="truncate-end">{r.description || '—'}</Text>
+          {kind.some(Boolean) && (
+            <Text dimColor wrap="truncate-end">
+              {kind.filter(Boolean).join(' · ')}
+            </Text>
+          )}
+          <Text dimColor wrap="truncate-end">
+            {facts.filter(Boolean).join(' · ')}
+          </Text>
+        </Box>
+      )
+    }
+
+    // A shell's or a monitor's command under its description; how it ended is not told, only that it did.
+    const taskRow = (t: TaskRow) => {
+      const s = TASK_STATUS[t.status] ?? TASK_STATUS.running
+      const running = isTaskActive(t.status)
+      const facts = [taskElapsedLabel(t, now), t.agentId ? 'lancée par un agent' : '']
+
+      return (
+        <Box flexDirection="column" marginBottom={1}>
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text bold={running} dimColor={!running} wrap="truncate-end">
+              {taskKindLabel(t.kind)}
+            </Text>
+            <Text color={s.color}>
+              {s.glyph} {s.label}
+            </Text>
+          </Box>
+          <Text wrap="truncate-end">{t.description || t.command || '—'}</Text>
+          {t.description !== '' && t.command && (
+            <Text dimColor wrap="truncate-end">
+              $ {t.command}
+            </Text>
+          )}
+          {facts.some(Boolean) && (
+            <Text dimColor wrap="truncate-end">
+              {facts.filter(Boolean).join(' · ')}
+            </Text>
+          )}
+        </Box>
+      )
+    }
+
+    const agentsTab = () => {
+      const st = agentsState
+      if (!st) return <Text dimColor>Pas encore de relevé : appuyez sur ↻.</Text>
+      const tasks = st.tasks ?? []
+      const active = st.rows.filter(r => isActive(r.status)).length + tasks.filter(t => isTaskActive(t.status)).length
+
+      return (
+        <Box flexDirection="column">
+          {st.error && <Text color="error">Liste des agents illisible : {st.error}</Text>}
+          {st.rows.length === 0 && tasks.length === 0 ? (
+            <Text dimColor>Aucun agent ni tâche en arrière-plan dans cette session.</Text>
+          ) : (
+            <Box flexDirection="column">
+              <Box marginBottom={1}>
+                <Text dimColor>
+                  {st.rows.length} agent{st.rows.length > 1 ? 's' : ''} · {tasks.length} tâche{tasks.length > 1 ? 's' : ''} · {active} actif
+                  {active > 1 ? 's' : ''}
+                </Text>
+              </Box>
+              {section('Agents')}
+              {st.rows.length === 0 ? (
+                <Box marginBottom={1}>
+                  <Text dimColor>Aucun agent dans cette session.</Text>
+                </Box>
+              ) : (
+                st.rows.map(agentRow)
+              )}
+              {section('Tâches en arrière-plan')}
+              {tasks.length === 0 ? <Text dimColor>Aucune tâche en arrière-plan.</Text> : tasks.map(taskRow)}
+            </Box>
+          )}
+        </Box>
+      )
+    }
+
     const drawTab = () => {
       switch (current) {
+        case 'agents':
+          return agentsTab()
         case 'watch':
           return watchTab()
         case 'gain':

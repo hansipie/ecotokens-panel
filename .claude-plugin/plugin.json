@@ -5,5 +5,13 @@
     "name": "Hansi P."
   },
   "description": "Claude Code plugin: a footer button that opens a tabbed side panel for ecotokens: session context and quota, handoff, savings, Jev usage and the index watcher",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "liveTranscript": {
+      "type": "boolean",
+      "title": "Lignes ecotokens dans la conversation",
+      "description": "Affiche sous chaque résultat d’outil ce qu’ecotokens a économisé, et en fin de tour le bilan et la décision de Jev. Désactivé : seul le panneau les montre.",
+      "default": true
+    }
+  }
 }

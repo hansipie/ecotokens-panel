@@ -42,6 +42,47 @@ test('the session tab shows context and quota once refreshed', async ($, on) => 
   }
 })
 
+test('the model buttons are fixed, the effort buttons list what /config offers, and the current effort', async ($, on) => {
+  mock.clock(on)
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('session.usage', async () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  on('session.model', async () => ({ value: 'claude-opus-5-5' }))
+  const row = { description: undefined, provider: { plugin: 'engine', tier: 'core' }, isLocked: false } as const
+  on('config.list', async () => ({
+    value: [
+      { ...row, key: 'model', label: 'Model', kind: 'choice', value: 'opus', options: ['fable', 'opus', 'sonnet'] },
+      { ...row, key: 'effort', label: 'Effort', kind: 'choice', value: 'xhigh', options: ['medium', 'xhigh'] },
+    ],
+  }))
+
+  const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'refresh' })
+  // The model row of /config is ignored: the four models always show.
+  for (const key of ['model-haiku', 'model-sonnet', 'model-opus', 'model-fable']) {
+    expect(await ui.find({ key })).toBeDefined()
+  }
+  expect((await ui.find({ key: 'model-opus' }))?.props.variant).toBe('primary')
+  expect((await ui.find({ key: 'effort-xhigh' }))?.props.variant).toBe('primary')
+  expect((await ui.find({ key: 'effort-medium' }))?.props.variant).toBe('secondary')
+  // The effort list is the one /config offers: low is not on offer here.
+  expect(await ui.find({ key: 'effort-low' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the effort buttons fall back to the built-in list when /config gives none', async ($, on) => {
+  mock.clock(on)
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('session.usage', async () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  on('config.list', async () => ({ value: [] }))
+
+  const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'refresh' })
+  for (const key of ['model-fable', 'model-opus', 'model-sonnet', 'model-haiku', 'effort-low', 'effort-xhigh', 'effort-max']) {
+    expect(await ui.find({ key })).toBeDefined()
+  }
+  await ui.unmount()
+})
+
 test('the footer keeps the engine modes and adds the toggle button', async $ => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({
@@ -246,5 +287,223 @@ test('a tab whose saved state predates a field still draws', async ($, on) => {
   const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface: 'terminal', ...PANE })
   expect(await ui.find({ key: 'tab-gain' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /ancien/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the agents tab says when the session has no agent and no background task', async ($, on) => {
+  mock.clock(on)
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('agent.list', async () => ({ value: [] }))
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface, ...PANE })
+    await ui.press({ key: 'tab-agents' })
+    expect(await ui.find({ type: 'Text', text: 'Aucun agent ni tâche en arrière-plan dans cette session.' })).toBeDefined()
+    await ui.press({ key: 'tab-session' })
+    await ui.unmount()
+  }
+})
+
+test('the agents tab follows a subagent from its spawn to its end, live', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('ui.panes', async () => ({ value: [{ id: 'ecotokens-panel', title: 'ecotokens-panel', isShown: true, isFocused: false, isPlaced: true }] }))
+  let listed: { id: string; description: string; type: string; status: 'running' | 'completed'; name?: string }[] = []
+  on('agent.list', async () => ({ value: listed }))
+  on('agent.spawn', async () => ({ model: 'claude-haiku-4-5', agentId: 'a1' }))
+  on('turn.complete', async (_$, e) => ({ text: e.answer }))
+
+  const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'tab-agents' })
+  expect(await ui.find({ type: 'Text', text: 'Aucun agent ni tâche en arrière-plan dans cette session.' })).toBeDefined()
+
+  listed = [{ id: 'a1', description: 'Explore the repo', type: 'Explore', status: 'running', name: 'scout' }]
+  await $.agent.spawn({
+    tool_use_id: 'toolu_1',
+    prompt: 'Map the repo.',
+    description: 'Explore the repo',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: true,
+    fork: false,
+    name: 'scout',
+  })
+  expect(await ui.find({ type: 'Text', text: 'scout' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '● en cours' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Explore the repo' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Explore · arrière-plan · haiku-4-5' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '1 agent · 0 tâche · 1 actif' })).toBeDefined()
+
+  // The tab re-reads the list on a timer while it is shown: the elapsed time moves.
+  await clock.advance(64_000)
+  expect(await ui.find({ type: 'Text', text: 'depuis 1 min 04 s · 0 outil' })).toBeDefined()
+
+  listed = [{ ...listed[0]!, status: 'completed' }]
+  await $.turn.complete({
+    answer: 'Done.',
+    durationMs: 70_000,
+    isAborted: false,
+    turnId: 'turn-1',
+    agentId: 'a1',
+    reason: 'answer',
+    usage: { input_tokens: 1_000, output_tokens: 2_000, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 0, model: 'claude-haiku-4-5' },
+  })
+  expect(await ui.find({ type: 'Text', text: '✓ terminé' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '1 min 10 s · 0 outil · 41.0k → 2.0k tokens' })).toBeDefined()
+
+  // The engine drops the finished task: the row stays.
+  listed = []
+  await clock.advance(2_000)
+  expect(await ui.find({ type: 'Text', text: '✓ terminé' })).toBeDefined()
+  await ui.press({ key: 'tab-session' })
+  await clock.advance(2_000)
+  await ui.unmount()
+})
+
+test('the agents tab lists the background tasks: started, still in flight, stopped, ended', async ($, on) => {
+  const clock = mock.clock(on, { now: 5_000_000 })
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('ui.panes', async () => ({ value: [{ id: 'ecotokens-panel', title: 'ecotokens-panel', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('agent.list', async () => ({ value: [{ id: 'a1', description: 'Review', type: 'general-purpose', status: 'running' as const }] }))
+  on('classic.Stop', async () => ({}))
+  on('tool.call', async (_$, e) => {
+    if (e.tool === 'Bash') return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bash_1' } }
+    if (e.tool === 'Monitor') return { result: { taskId: 'mon_1', timeoutMs: 300_000 } }
+    if (e.tool === 'TaskStop') return { result: { message: 'stopped', task_id: 'mon_1', task_type: 'monitor' } }
+    return { result: {} as never }
+  })
+
+  const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'tab-agents' })
+  expect(await ui.find({ type: 'Text', text: 'Aucune tâche en arrière-plan.' })).toBeDefined()
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start dev server', run_in_background: true })
+  await $.tool.call({ tool: 'Monitor', description: 'Watch the build log', timeout_ms: 300_000, command: 'tail -f build.log' })
+  expect(await ui.find({ type: 'Text', text: 'Shell' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Start dev server' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '$ npm run dev' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Monitor' })).toBeDefined()
+  await clock.advance(30_000)
+  expect(await ui.findAll({ type: 'Text', text: 'depuis 30 s' })).toHaveLength(2)
+
+  await $.tool.call({ tool: 'TaskStop', task_id: 'mon_1' })
+  expect(await ui.find({ type: 'Text', text: '■ arrêté' })).toBeDefined()
+
+  // The Stop names what is in flight: a workflow it did not see start joins, the subagent stays an agent.
+  await $.classic.Stop({
+    stop_hook_active: false,
+    background_tasks: [
+      { id: 'bash_1', type: 'shell', status: 'running', description: 'Start dev server', command: 'npm run dev' },
+      { id: 'wf_1', type: 'workflow', status: 'running', description: 'Nightly review', name: 'review' },
+      { id: 'a1', type: 'subagent', status: 'running', description: 'Review', agent_type: 'general-purpose' },
+    ],
+  })
+  expect(await ui.find({ type: 'Text', text: 'Workflow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /1 agent · 3 tâches · 3 actifs/ })).toBeDefined()
+
+  // Gone from the next Stop: ended, at most this long.
+  await clock.advance(10_000)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+  expect(await ui.findAll({ type: 'Text', text: '◇ terminé' })).toHaveLength(2)
+  expect(await ui.find({ type: 'Text', text: '≤ 40 s' })).toBeDefined()
+  await ui.press({ key: 'tab-session' })
+  await clock.advance(2_000)
+  await ui.unmount()
+})
+
+// The engine under the plugin: ecotokens' databases exist, sqlite3 answers the three kinds of query.
+function ecotokensRows(on: Parameters<Parameters<typeof test>[1]>[1], saved: object[], hasDb = true) {
+  mock.env(on, { HOME: '/home/me' })
+  on('session.cwd', async () => ({ value: '/home/me/proj' }))
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('session.usage', async () => ({ value: { startedAt: Date.parse('2026-10-06T08:00:00Z'), context: { window: 200_000 }, rateLimits: [] } }))
+  on('fs.exists', async () => ({ value: hasDb }))
+  // The engine draws the result as it is: the plugin's line comes under it.
+  on('ui.render', async () => ({ type: 'engine', ref: 0 }))
+  on('tool.call', async () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
+  on('turn.complete', async () => ({ text: '' }))
+  const logged: string[] = []
+  const ran: string[][] = []
+  on('ui.log', async (_$, e) => {
+    logged.push(e.text)
+
+    return {}
+  })
+  on('process.run', async (_$, e) => {
+    ran.push(e.argv)
+    const sql = e.argv[4] ?? ''
+    const rows = sql.includes('count(*)')
+      ? [{ saved: 24_100, filtered: 3 }]
+      : sql.includes('jev_calls')
+        ? [{ timestamp: '2026-10-06T09:16:27.735119961+00:00', purpose: 'router', agent: 'router-everyday', ok: 1, error_kind: null, http_status: null, latency_ms: 595, input_tokens: 564, output_tokens: 67, size: 'everyday', confidence: 0.76, followup_prob: 0.1 }]
+        : saved
+
+    return { value: { exitCode: 0, stdout: JSON.stringify(rows), stderr: '' } }
+  })
+
+  return { logged, ran }
+}
+
+test('a tool result carries what ecotokens saved on that call, a folded group the sum, and the turn its balance', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-06T09:00:00Z') })
+  const saved = [
+    { id: 'r1', timestamp: '2026-10-06T09:00:00.500000000+00:00', command: 'bash -c git diff --stat', cut: 0, tokens_before: 12_400, tokens_after: 1_100, mode: 'summarized' },
+    { id: 'r2', timestamp: '2026-10-06T09:00:00.700000000+00:00', command: 'Read /x/register.tsx', cut: 0, tokens_before: 1_250, tokens_after: 75, mode: 'filtered' },
+  ]
+  const { logged } = ecotokensRows(on, saved)
+
+  const result = (id: string) => ({ plugin: 'ecotokens-panel', surface: 'terminal', component: 'ToolResult', requestId: id, props: { tool_use_id: id, tool: 'Bash', output: {}, isErrored: false } }) as const
+  const diff = await $.ui.mount(result('tu1'))
+  const plain = await $.ui.mount(result('tu3'))
+  const group = await $.ui.mount({
+    plugin: 'ecotokens-panel',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    requestId: 'grp',
+    props: { calls: [{ tool_use_id: 'tu2', tool: 'Read', input: {}, isRunning: false, isErrored: false, isInterrupted: false }], isActive: false, isExpanded: false },
+  })
+  expect(await diff.find({ type: 'Text', text: /ecotokens ·/ })).toBeUndefined()
+
+  // The command ran, ecotokens wrote its row: the line appears under that call's result alone.
+  await $.tool.call({ tool: 'Bash', command: 'git diff --stat', tool_use_id: 'tu1' })
+  await $.tool.call({ tool: 'Read', file_path: '/x/register.tsx', tool_use_id: 'tu2' })
+  await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'tu3' })
+  expect(await diff.find({ type: 'Text', text: '  ecotokens · 12.4k → 1.1k (−91 %) · résumé IA' })).toBeDefined()
+  expect(await plain.find({ type: 'Text', text: /ecotokens ·/ })).toBeUndefined()
+  expect(await group.find({ type: 'Text', text: '  ecotokens · 1 sortie filtrée · −1.2k tokens' })).toBeDefined()
+
+  // The turn ends: what was saved since the start and what Jev decided.
+  await $.turn.complete({ answer: 'Done.', durationMs: 5_000, isAborted: false, turnId: 'turn-1', reason: 'answer' })
+  expect(logged).toEqual(['ecotokens · 3 sorties filtrées · −24.1k tokens · Jev : Message jugé courant (p=0.76) → délégué à router-everyday (Sonnet)'])
+  await clock.advance(10_000)
+  await diff.unmount()
+  await plain.unmount()
+  await group.unmount()
+})
+
+test('without ecotokens nothing is run and the transcript is left alone', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-06T09:00:00Z') })
+  const { logged, ran } = ecotokensRows(on, [], false)
+
+  const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface: 'terminal', component: 'ToolResult', requestId: 'tu1', props: { tool_use_id: 'tu1', tool: 'Bash', output: {}, isErrored: false } })
+  await $.tool.call({ tool: 'Bash', command: 'git diff', tool_use_id: 'tu1' })
+  await $.turn.complete({ answer: 'Done.', durationMs: 5_000, isAborted: false, turnId: 'turn-1', reason: 'answer' })
+  expect(ran).toEqual([])
+  expect(logged).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /ecotokens ·/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the liveTranscript option turns the lines off', { options: { liveTranscript: false } }, async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-06T09:00:00Z') })
+  const saved = [{ id: 'r1', timestamp: '2026-10-06T09:00:00.500000000+00:00', command: 'bash -c git diff', cut: 0, tokens_before: 12_400, tokens_after: 1_100, mode: 'summarized' }]
+  const { logged } = ecotokensRows(on, saved)
+
+  const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface: 'terminal', component: 'ToolResult', requestId: 'tu1', props: { tool_use_id: 'tu1', tool: 'Bash', output: {}, isErrored: false } })
+  await $.tool.call({ tool: 'Bash', command: 'git diff', tool_use_id: 'tu1' })
+  await $.turn.complete({ answer: 'Done.', durationMs: 5_000, isAborted: false, turnId: 'turn-1', reason: 'answer' })
+  expect(logged).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /ecotokens ·/ })).toBeUndefined()
   await ui.unmount()
 })

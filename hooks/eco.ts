@@ -1,4 +1,4 @@
-import type { EcoJevCall, EcoLog, EcoSaving } from '../types'
+import type { EcoCall, EcoJevCall, EcoLog, EcoMark, EcoSaving, EcoTrack } from '../types'
 
 // ecotokens keeps no session id: "this session" is every row since it started.
 // Savings are also held to the session's project (their git_root); Jev calls carry none.
@@ -138,12 +138,19 @@ type JevRow = {
   followup_prob: number | null
 }
 
-export function ecoQueries(home: string, startedAt: number, sessionCwd: string): EcoQueries {
-  const dir = `${home}/.config/ecotokens`
+// The rows that saved something since `startedAt`, in the session's project.
+function savedSince(startedAt: number, sessionCwd: string) {
   const since = quote(new Date(startedAt).toISOString())
   const cwd = quote(sessionCwd)
   const inProject = `(git_root IS NULL OR git_root = ${cwd} OR ${cwd} LIKE git_root || '/%')`
-  const saved = `timestamp >= ${since} AND tokens_after < tokens_before AND ${inProject}`
+
+  return `timestamp >= ${since} AND tokens_after < tokens_before AND ${inProject}`
+}
+
+export function ecoQueries(home: string, startedAt: number, sessionCwd: string): EcoQueries {
+  const dir = `${home}/.config/ecotokens`
+  const since = quote(new Date(startedAt).toISOString())
+  const saved = savedSince(startedAt, sessionCwd)
 
   return {
     savings: sqlite(
@@ -223,4 +230,129 @@ export function ecoError(error: unknown, now: number): EcoLog {
     error: error instanceof Error ? error.message : String(error),
     measuredAt: now,
   }
+}
+
+export function kTokens(n: number) {
+  return n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : String(n)
+}
+
+// ecotokens stamps nanoseconds; Date reads milliseconds.
+export function stamp(iso: string) {
+  return Date.parse(iso.replace(/(\.\d{3})\d+/, '$1'))
+}
+
+// What the transcript shows under a tool result, and the live line of a turn.
+// ecotokens keeps no tool_use_id: a call and its row meet by command text and by the clock.
+
+const MARK_MODES: Record<string, string> = {
+  filtered: 'filtré',
+  summarized: 'résumé IA',
+  rewritten: 'réécrit',
+}
+
+function squash(command: string) {
+  return command.replace(/^bash -c\s+/, '').replace(/\s+/g, ' ').trim()
+}
+
+// How ecotokens words a call in its `command` column: only the tools it intercepts have one.
+export function callKey(tool: string, input: Record<string, unknown>): string | undefined {
+  if (tool === 'Bash' && typeof input.command === 'string') return squash(input.command)
+  if (tool === 'Read' && typeof input.file_path === 'string') return `Read ${input.file_path}`
+
+  return undefined
+}
+
+export type MarkRow = {
+  id: string
+  timestamp: string
+  command: string
+  // The query keeps 200 characters of the command: a longer one can only be matched by its start.
+  cut: number
+  tokens_before: number
+  tokens_after: number
+  mode: string
+}
+
+// The rows that saved something since `since`, oldest first.
+export function ecoMarkQuery(home: string, since: number, sessionCwd: string): EcoQuery {
+  return sqlite(
+    `${home}/.config/ecotokens/metrics.db`,
+    `SELECT id, timestamp, substr(replace(replace(command, char(10), ' '), char(13), ' '), 1, 200) AS command,
+            length(command) > 200 AS cut, tokens_before, tokens_after, mode
+       FROM interceptions WHERE ${savedSince(since, sessionCwd)} ORDER BY timestamp LIMIT 300`,
+  )
+}
+
+// A row is written by the hook around the call: as far ahead of it as a permission dialog waited,
+// as far behind as the AI summary of a long output took.
+export const MATCH_LEAD_MS = 120_000
+export const MATCH_LAG_MS = 15_000
+
+function sameCommand(key: string, row: MarkRow) {
+  const command = squash(row.command)
+
+  return row.cut === 1 ? key.startsWith(command) : key === command
+}
+
+// Gives each waiting call the unclaimed row with its command nearest to its run, oldest call first.
+// A call with no row yet waits for the next round, until `now` is past the time a row can still come.
+export function matchMarks(track: EcoTrack, rows: MarkRow[], now: number) {
+  const claimed = new Set(track.claimed)
+  const marks: { id: string; mark: EcoMark }[] = []
+  const waiting: EcoCall[] = []
+
+  for (const call of [...track.calls].sort((a, b) => a.startedAt - b.startedAt)) {
+    let best: MarkRow | undefined
+    let bestGap = Infinity
+    for (const row of rows) {
+      if (claimed.has(row.id) || !sameCommand(call.key, row)) continue
+      const at = stamp(row.timestamp)
+      if (at < call.startedAt - MATCH_LEAD_MS || at > call.endedAt + MATCH_LAG_MS) continue
+      const gap = Math.max(call.startedAt - at, at - call.endedAt, 0)
+      if (gap < bestGap) {
+        best = row
+        bestGap = gap
+      }
+    }
+    if (best) {
+      claimed.add(best.id)
+      marks.push({ id: call.id, mark: { before: best.tokens_before, after: best.tokens_after, mode: best.mode } })
+    } else if (now <= call.endedAt + MATCH_LAG_MS) {
+      waiting.push(call)
+    }
+  }
+
+  return { track: { calls: waiting, claimed: [...claimed].slice(-200) }, marks }
+}
+
+function plural(n: number, one: string, many: string) {
+  return `${n} ${n > 1 ? many : one}`
+}
+
+// `ecotokens · 12.4k → 1.1k (−91 %) · résumé IA`
+export function markLine(mark: EcoMark) {
+  const pct = mark.before > 0 ? Math.round((1 - mark.after / mark.before) * 100) : 0
+
+  return `ecotokens · ${kTokens(mark.before)} → ${kTokens(mark.after)} (−${pct} %) · ${MARK_MODES[mark.mode] ?? mark.mode}`
+}
+
+// One line under a folded group of tool calls: what ecotokens saved on the ones it touched.
+export function groupLine(marks: EcoMark[]) {
+  const saved = marks.reduce((sum, m) => sum + m.before - m.after, 0)
+
+  return `ecotokens · ${plural(marks.length, 'sortie filtrée', 'sorties filtrées')} · −${kTokens(saved)} tokens`
+}
+
+// The line that closes a turn: what ecotokens saved and what Jev decided since the last one.
+export function turnLine(log: EcoLog) {
+  const parts: string[] = []
+  if (log.totalFiltered > 0) {
+    parts.push(`${plural(log.totalFiltered, 'sortie filtrée', 'sorties filtrées')} · −${kTokens(log.totalSaved)} tokens`)
+  }
+  const routed = log.jev.find(c => c.purpose === 'router')
+  const filters = log.jev.filter(c => c.purpose === 'filter_lines').length
+  const jev = [routed?.what, filters > 0 ? plural(filters, 'filtrage IA', 'filtrages IA') : undefined].filter(Boolean)
+  if (jev.length > 0) parts.push(`Jev : ${jev.join(' · ')}`)
+
+  return parts.length > 0 ? `ecotokens · ${parts.join(' · ')}` : undefined
 }
