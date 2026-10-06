@@ -1,0 +1,13 @@
+{
+  "name": "hansi-mods",
+  "owner": {
+    "name": "Hansi P."
+  },
+  "description": "Hansi P.'s Claude Code mods",
+  "plugins": [
+    {
+      "name": "ecotokens-panel",
+      "source": "./"
+    }
+  ]
+}

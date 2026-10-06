@@ -1,0 +1,4 @@
+.claude-plugin/types/
+# Old compiled output: the engine loads the .ts/.tsx sources itself.
+hooks/*.js
+tests/*.js
