@@ -1,5 +1,6 @@
 import type { AgentInfo, AgentSpawnInput, TurnCompleteInput } from 'claude-code'
 
+import { kTokens } from './eco'
 import type { AgentRow, AgentRunStatus, TaskRow, TaskRunStatus } from '../types'
 
 // What the Agents tab keeps: the newest rows, the running ones first.
@@ -91,6 +92,68 @@ export function recordToolUse(rows: AgentRow[], agentId: string, tool: string): 
   return rows.map(r => (r.id === agentId ? { ...r, toolUses: r.toolUses + 1, lastTool: tool } : r))
 }
 
+// USD per million tokens by model family: input, output, cache read, cache write (5-minute). The engine
+// gives no cost per run and no price list, so these are the list prices of the current models as the
+// Claude API reference gives them (2026-09): approximate, to be kept up to date by hand.
+const PRICES: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
+  haiku: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+  sonnet: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+  opus: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+  fable: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
+}
+
+type RunUsage = {
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  model?: string
+}
+
+// What one run cost, in USD; undefined for a model of a family the table does not know.
+export function runCost(usage: RunUsage | undefined): number | undefined {
+  const family = Object.keys(PRICES).find(f => usage?.model?.includes(f))
+  const price = family ? PRICES[family] : undefined
+  if (!usage || !price) return undefined
+
+  return (
+    (usage.input_tokens * price.input +
+      usage.output_tokens * price.output +
+      usage.cache_read_input_tokens * price.cacheRead +
+      usage.cache_creation_input_tokens * price.cacheWrite) /
+    1_000_000
+  )
+}
+
+export function costLabel(usd: number) {
+  return usd < 0.005 ? '< $0.01' : `≈ $${usd.toFixed(2)}`
+}
+
+// The line under a delegated run (a `router-*` subagent) that ended; undefined for any other agent.
+export function delegationLine(type: string, usage: RunUsage | undefined) {
+  if (!type.startsWith('router-') || !usage) return undefined
+  const cost = runCost(usage)
+  const input = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+
+  return [
+    'délégation',
+    `${type}${usage.model ? ` (${shortModel(usage.model)})` : ''}`,
+    `${kTokens(input)} → ${kTokens(usage.output_tokens)} tokens`,
+    cost === undefined ? '' : costLabel(cost),
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+// A run's cost adds up on the row; one that cannot be priced leaves the whole total unknown.
+function runCostFields(r: AgentRow, u: RunUsage | undefined) {
+  if (!u) return {}
+  const cost = runCost(u)
+  if (cost === undefined || r.isCostUnknown) return { costUsd: undefined, isCostUnknown: true }
+
+  return { costUsd: (r.costUsd ?? 0) + cost }
+}
+
 // One run of the agent's loop ended: what it cost, how long it ran and how it ended.
 export function recordTurn(
   rows: AgentRow[],
@@ -107,6 +170,7 @@ export function recordTurn(
           model: u?.model ?? r.model,
           inputTokens: r.inputTokens + (u ? u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens : 0),
           outputTokens: r.outputTokens + (u?.output_tokens ?? 0),
+          ...runCostFields(r, u),
           durationMs: e.durationMs,
           endedAt: now,
           outcome: r.isTeammate ? undefined : outcome,

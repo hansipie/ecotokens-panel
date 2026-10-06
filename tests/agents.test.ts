@@ -1,6 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
+  costLabel,
+  delegationLine,
   durationLabel,
   elapsedLabel,
   mergeListed,
@@ -11,6 +13,7 @@ import {
   recordTaskStop,
   recordToolUse,
   recordTurn,
+  runCost,
   shortModel,
   taskElapsedLabel,
   taskFromCall,
@@ -130,4 +133,34 @@ test('an ended agent or task leaves five minutes after it ended, a running or li
   const later = pruneEnded(s, 2_001 + 5 * 60_000)
   expect(later.rows.map(r => r.id)).toEqual(['a2', 'a3'])
   expect(later.tasks.map(t => t.id)).toEqual(['t2'])
+})
+
+const SONNET = { input_tokens: 1_000, output_tokens: 2_000, cache_read_input_tokens: 30_000, cache_creation_input_tokens: 10_000, model: 'claude-sonnet-5-5' }
+
+test('a run is priced per family, cache read and write apart, and an unknown model has no price', () => {
+  // 1k x 2 + 2k x 10 + 30k x 0.2 + 10k x 2.5 = 2000 + 20000 + 6000 + 25000 per million
+  expect(Math.round((runCost(SONNET))! * 1e6) / 1e6).toBe(0.053)
+  expect(Math.round((runCost({ ...SONNET, model: 'claude-haiku-4-5-20251001' }))! * 1e6) / 1e6).toBe(0.0265)
+  expect(runCost({ ...SONNET, model: 'gpt-x' })).toBeUndefined()
+  expect(runCost({ ...SONNET, model: undefined })).toBeUndefined()
+  expect(costLabel(0.153)).toBe('≈ $0.15')
+  expect(costLabel(0.001)).toBe('< $0.01')
+})
+
+test('an agent row adds up its runs cost, and one unpriced run hides the total', () => {
+  let rows = recordSpawn([], SPAWN, { agentId: 'a1' }, 0)
+  rows = recordTurn(rows, { agentId: 'a1', reason: 'answer', durationMs: 1, usage: SONNET }, 1)
+  rows = recordTurn(rows, { agentId: 'a1', reason: 'answer', durationMs: 1, usage: SONNET }, 2)
+  expect(Math.round((rows[0]?.costUsd)! * 1e6) / 1e6).toBe(0.106)
+  rows = recordTurn(rows, { agentId: 'a1', reason: 'answer', durationMs: 1, usage: { ...SONNET, model: 'gpt-x' } }, 3)
+  expect(rows[0]).toEqual(expect.objectContaining({ costUsd: undefined, isCostUnknown: true }))
+  rows = recordTurn(rows, { agentId: 'a1', reason: 'answer', durationMs: 1, usage: SONNET }, 4)
+  expect(rows[0]?.costUsd).toBeUndefined()
+})
+
+test('only a router-* run writes a delegation line, with its cost when it can be priced', () => {
+  expect(delegationLine('router-everyday', SONNET)).toBe('délégation · router-everyday (sonnet-5-5) · 41.0k → 2.0k tokens · ≈ $0.05')
+  expect(delegationLine('router-tiny', { ...SONNET, model: 'mystery-1' })).toBe('délégation · router-tiny (mystery-1) · 41.0k → 2.0k tokens')
+  expect(delegationLine('Explore', SONNET)).toBeUndefined()
+  expect(delegationLine('router-large', undefined)).toBeUndefined()
 })

@@ -15,6 +15,8 @@ import {
   recordTaskStart,
   recordTaskStop,
   recordToolUse,
+  costLabel,
+  delegationLine,
   recordTurn,
   shortModel,
   taskElapsedLabel,
@@ -291,6 +293,17 @@ async function logEcoTurn($: EngineInterface) {
     if (line) $.ui.log(line)
   } catch {
     // No line for this turn.
+  }
+}
+
+// A delegated run (a `router-*` subagent) ended: what it used and cost, one line per finished run.
+async function logDelegation($: EngineInterface, id: string, usage: Parameters<typeof delegationLine>[1]) {
+  try {
+    const row = (await read($, agents))?.rows.find(r => r.id === id)
+    const line = row ? delegationLine(row.type, usage) : undefined
+    if (line) $.ui.log(line)
+  } catch {
+    // No line for this run.
   }
 }
 
@@ -577,6 +590,7 @@ export const register: Register = (on, options) => {
     await refreshEcoIfShown($)
     if (live) await matchEco($)
     if (live && !id) await logEcoTurn($)
+    if (live && id) await logDelegation($, id, e.usage)
     const shown = await read($, tab)
     if (shown === 'session' && (await isPaneOpen($))) await refreshHandoff($)
     if (shown === 'watch' && (await isPaneOpen($))) await refreshWatch($)
@@ -1173,6 +1187,7 @@ export const register: Register = (on, options) => {
         elapsedLabel(r, now),
         `${r.toolUses} outil${r.toolUses > 1 ? 's' : ''}${running && r.lastTool ? ` (${r.lastTool})` : ''}`,
         r.inputTokens + r.outputTokens > 0 ? `${kTokens(r.inputTokens)} → ${kTokens(r.outputTokens)} tokens` : '',
+        r.costUsd === undefined ? '' : costLabel(r.costUsd),
       ]
 
       return (

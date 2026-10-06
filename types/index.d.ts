@@ -226,6 +226,10 @@ export type AgentRow = {
   // Tokens of its finished runs: input (cache included) and output.
   inputTokens: number
   outputTokens: number
+  // What its finished runs cost in USD (approximate: a built-in price table); absent before a run, and
+  // when a run's model could not be priced (`isCostUnknown`).
+  costUsd?: number
+  isCostUnknown?: boolean
   // True while `$.agent.list()` names it.
   isListed: boolean
 }

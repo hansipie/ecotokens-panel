@@ -350,7 +350,7 @@ test('the agents tab follows a subagent from its spawn to its end, live', async 
     usage: { input_tokens: 1_000, output_tokens: 2_000, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 0, model: 'claude-haiku-4-5' },
   })
   expect(await ui.find({ type: 'Text', text: '✓ terminé' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '1 min 10 s · 0 outil · 41.0k → 2.0k tokens' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '1 min 10 s · 0 outil · 41.0k → 2.0k tokens · ≈ $0.01' })).toBeDefined()
 
   // The engine drops the finished task: the row stays.
   listed = []
@@ -522,5 +522,46 @@ test('the liveTranscript option turns the lines off', { options: { liveTranscrip
   await $.turn.complete({ answer: 'Done.', durationMs: 5_000, isAborted: false, turnId: 'turn-1', reason: 'answer' })
   expect(logged).toEqual([])
   expect(await ui.find({ type: 'Text', text: /ecotokens ·/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a delegated run writes its tokens and cost in the conversation, and the Background row shows the cost', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('ui.panes', async () => ({ value: [{ id: 'ecotokens-panel', title: 'ecotokens-panel', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('agent.list', async () => ({ value: [{ id: 'r1', description: 'Write the email', type: 'router-everyday', status: 'completed' }] }))
+  on('agent.spawn', async (_$, e) => ({ model: 'claude-sonnet-5-5', agentId: e.subagentType === 'router-everyday' ? 'r1' : 'e1' }))
+  on('turn.complete', async (_$, e) => ({ text: e.answer }))
+  const logged: string[] = []
+  on('ui.log', async (_$, e) => {
+    logged.push(e.text)
+
+    return {}
+  })
+  const spawn = (type: string) =>
+    $.agent.spawn({ tool_use_id: 'toolu_1', prompt: 'Go.', description: 'd', subagentType: type, background: false, isTeammate: false })
+  const done = (agentId: string) =>
+    $.turn.complete({
+      answer: 'Done.',
+      durationMs: 70_000,
+      isAborted: false,
+      turnId: 'turn-1',
+      agentId,
+      reason: 'answer',
+      usage: { input_tokens: 1_000, output_tokens: 2_000, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 0, model: 'claude-sonnet-5-5' },
+    })
+
+  const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'tab-agents' })
+  await spawn('router-everyday')
+  await done('r1')
+  // 1k x 2 + 2k x 10 + 40k x 0.2 = $0.03
+  expect(logged).toEqual(['délégation · router-everyday (sonnet-5-5) · 41.0k → 2.0k tokens · ≈ $0.03'])
+  expect(await ui.find({ type: 'Text', text: '1 min 10 s · 0 outil · 41.0k → 2.0k tokens · ≈ $0.03' })).toBeDefined()
+
+  // Any other subagent: no line.
+  await spawn('Explore')
+  await done('e1')
+  expect(logged).toHaveLength(1)
   await ui.unmount()
 })
