@@ -3,7 +3,7 @@
   "owner": {
     "name": "Hansi P."
   },
-  "description": "Hansi P.'s Claude Code mods",
+  "description": "Hansi P.'s plugins for Claude Code",
   "plugins": [
     {
       "name": "ecotokens-panel",

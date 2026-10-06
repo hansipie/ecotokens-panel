@@ -4,6 +4,6 @@
   "author": {
     "name": "Hansi P."
   },
-  "description": "A footer button that opens a tabbed side panel for ecotokens: session context and quota, handoff, savings, Jev usage and the index watcher",
+  "description": "Claude Code plugin: a footer button that opens a tabbed side panel for ecotokens: session context and quota, handoff, savings, Jev usage and the index watcher",
   "types": "./types/index.d.ts"
 }

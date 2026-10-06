@@ -1,4 +1,6 @@
-# ecotokens-panel
+# ecotokens-panel — plugin pour Claude Code
+
+> **Ce plugin est fait pour [Claude Code](https://claude.com/claude-code)**, l'assistant de code en ligne de commande d'Anthropic. Il ne fonctionne pas seul ni dans d'autres outils (Codex, Gemini CLI, Qwen Code…), même si ecotokens les prend en charge.
 
 Un plugin Claude Code qui ajoute un bouton **◧ ecotokens-panel** dans le pied de page et un panneau latéral à onglets autour d'[ecotokens](https://github.com/hansipie/ecotokens) : contexte et quota de la session, handoff, économies de tokens, usage de Jev et watcher d'index.
 
@@ -14,6 +16,7 @@ Répondez `y` pour ajouter le marketplace, puis choisissez la portée (`user` pa
 
 ### Prérequis
 
+- **Claude Code** (terminal, ou onglet Code de l'application desktop), avec la prise en charge des plugins à hooks (`/plugin`).
 - **ecotokens 0.30.0 ou plus récent** dans le `PATH`, avec ses hooks installés (`ecotokens install`). L'onglet Gains utilise l'option `--project` de `ecotokens gain` et `ecotokens jev`, apparue dans cette version. Vérifiez avec `ecotokens --version`.
 - **sqlite3** dans le `PATH`, pour l'onglet Ecotokens, qui lit les bases d'ecotokens en lecture seule.
 
