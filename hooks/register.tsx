@@ -23,7 +23,7 @@ import {
 } from './agents'
 import type { InFlightTask } from './agents'
 import { cells, gradient } from './bar'
-import { callKey, ecoError, ecoLog, ecoMarkQuery, ecoQueries, groupLine, kTokens, markLine, matchMarks, message, parseRows, stamp, turnLine, MATCH_LEAD_MS } from './eco'
+import { callKey, ecoError, ecoLog, ecoMarkQuery, ecoQueries, ecoSavedQuery, groupLine, kTokens, markLine, matchMarks, message, parsePrice, parseRows, parseSaved, stamp, turnLine, MATCH_LEAD_MS } from './eco'
 import type { EcoQuery, MarkRow } from './eco'
 import { GAIN_PERIODS, PURPOSE_LABELS, gainCommand, jevCommand, parseGain, parseJev, sparkline } from './gain'
 import { HANDOFF_LIST, HANDOFF_STATUS, handoffToggle, parseHandoff, parseHandoffList } from './handoff'
@@ -262,7 +262,18 @@ async function matchEco($: EngineInterface) {
   }
 }
 
-// After a turn of the main conversation: what ecotokens saved and what Jev decided since the last one.
+// The model input price ecotokens counts avoided cost with; undefined (no cost shown) when unset or unreadable.
+async function ecoPrice($: EngineInterface) {
+  try {
+    const home = (await $.env.get('HOME')) ?? ''
+
+    return parsePrice(await $.fs.read(`${home}/.config/ecotokens/config.json`))
+  } catch {
+    return undefined
+  }
+}
+
+// After a turn of the main conversation: what ecotokens saved since the last one, and in the session.
 async function logEcoTurn($: EngineInterface) {
   try {
     const home = await ecoDir($)
@@ -271,9 +282,12 @@ async function logEcoTurn($: EngineInterface) {
     const now = await $.clock.now()
     const since = Math.max(await read($, ecoSeen), startedAt)
     await update($, ecoSeen, () => now)
-    const q = ecoQueries(home, since, await $.session.cwd())
-    const [totals, jev] = await Promise.all([runQuery($, q.totals), runQuery($, q.jev)])
-    const line = turnLine(ecoLog({ savings: '', totals, jev }, now))
+    const cwd = await $.session.cwd()
+    const [turn, session] = await Promise.all([
+      runQuery($, ecoSavedQuery(home, since, cwd)),
+      runQuery($, ecoSavedQuery(home, startedAt, cwd)),
+    ])
+    const line = turnLine(parseSaved(turn), parseSaved(session), await ecoPrice($))
     if (line) $.ui.log(line)
   } catch {
     // No line for this turn.
@@ -614,7 +628,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           {await next(e)}
-          <Text dimColor>{`  ${markLine(mark)}`}</Text>
+          <Text dimColor>{`  ${markLine(mark, await ecoPrice($))}`}</Text>
         </Box>
       )
     })
@@ -633,7 +647,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           {await next(e)}
-          <Text dimColor>{`  ${groupLine(marks)}`}</Text>
+          <Text dimColor>{`  ${groupLine(marks, await ecoPrice($))}`}</Text>
         </Box>
       )
     })

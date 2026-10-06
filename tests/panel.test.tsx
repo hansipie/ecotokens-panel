@@ -163,8 +163,8 @@ test('the ecotokens tab lists the session savings and Jev calls', async ($, on) 
   }))
   const queries: string[] = []
   on('process.run', async (_$, e) => {
-    const sql = e.argv[4] ?? ''
-    queries.push(`${e.argv[3]} ${sql}`)
+    const sql = e.argv.at(-1) ?? ''
+    queries.push(`${e.argv.at(-2)} ${sql}`)
     const rows = sql.includes('count(*)')
       ? [{ saved: 18_471, filtered: 20 }]
       : sql.includes('jev_calls')
@@ -413,18 +413,24 @@ test('the agents tab lists the background tasks: started, still in flight, stopp
 })
 
 // The engine under the plugin: ecotokens' databases exist, sqlite3 answers the three kinds of query.
-function ecotokensRows(on: Parameters<Parameters<typeof test>[1]>[1], saved: object[], hasDb = true) {
+function ecotokensRows(on: Parameters<Parameters<typeof test>[1]>[1], saved: object[], hasDb = true, config: string | null = '{"price_input_usd_per_mtok": 2.0}') {
   mock.env(on, { HOME: '/home/me' })
   on('session.cwd', async () => ({ value: '/home/me/proj' }))
   on('session.id', async () => ({ value: 'sess-1' }))
   on('session.usage', async () => ({ value: { startedAt: Date.parse('2026-10-06T08:00:00Z'), context: { window: 200_000 }, rateLimits: [] } }))
   on('fs.exists', async () => ({ value: hasDb }))
+  on('fs.read', async () => {
+    if (config === null) throw new Error('missing')
+
+    return { value: config }
+  })
   // The engine draws the result as it is: the plugin's line comes under it.
   on('ui.render', async () => ({ type: 'engine', ref: 0 }))
   on('tool.call', async () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
   on('turn.complete', async () => ({ text: '' }))
   const logged: string[] = []
   const ran: string[][] = []
+  const totals = [{ before: 27_700, after: 3_600 }, { before: 330_000, after: 18_000 }]
   on('ui.log', async (_$, e) => {
     logged.push(e.text)
 
@@ -432,8 +438,11 @@ function ecotokensRows(on: Parameters<Parameters<typeof test>[1]>[1], saved: obj
   })
   on('process.run', async (_$, e) => {
     ran.push(e.argv)
-    const sql = e.argv[4] ?? ''
-    const rows = sql.includes('count(*)')
+    const sql = e.argv.at(-1) ?? ''
+    // The turn's savings come first, then the session's.
+    const rows = sql.includes('sum(tokens_before) AS before')
+      ? [totals.shift()]
+      : sql.includes('count(*)')
       ? [{ saved: 24_100, filtered: 3 }]
       : sql.includes('jev_calls')
         ? [{ timestamp: '2026-10-06T09:16:27.735119961+00:00', purpose: 'router', agent: 'router-everyday', ok: 1, error_kind: null, http_status: null, latency_ms: 595, input_tokens: 564, output_tokens: 67, size: 'everyday', confidence: 0.76, followup_prob: 0.1 }]
@@ -469,17 +478,25 @@ test('a tool result carries what ecotokens saved on that call, a folded group th
   await $.tool.call({ tool: 'Bash', command: 'git diff --stat', tool_use_id: 'tu1' })
   await $.tool.call({ tool: 'Read', file_path: '/x/register.tsx', tool_use_id: 'tu2' })
   await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'tu3' })
-  expect(await diff.find({ type: 'Text', text: '  ecotokens · 12.4k → 1.1k (−91 %) · résumé IA' })).toBeDefined()
+  expect(await diff.find({ type: 'Text', text: '  ecotokens · −11.3k tokens (−91 %) · ≈ $0.02' })).toBeDefined()
   expect(await plain.find({ type: 'Text', text: /ecotokens ·/ })).toBeUndefined()
-  expect(await group.find({ type: 'Text', text: '  ecotokens · 1 sortie filtrée · −1.2k tokens' })).toBeDefined()
+  expect(await group.find({ type: 'Text', text: '  ecotokens · −1.2k tokens (−94 %) · < $0.01' })).toBeDefined()
 
-  // The turn ends: what was saved since the start and what Jev decided.
+  // The turn ends: what was saved in the turn and since the session started.
   await $.turn.complete({ answer: 'Done.', durationMs: 5_000, isAborted: false, turnId: 'turn-1', reason: 'answer' })
-  expect(logged).toEqual(['ecotokens · 3 sorties filtrées · −24.1k tokens · Jev : Message jugé courant (p=0.76) → délégué à router-everyday (Sonnet)'])
+  expect(logged).toEqual(['ecotokens · −24.1k tokens (−87 %) · ≈ $0.05 · session −312k · ≈ $0.62'])
   await clock.advance(10_000)
   await diff.unmount()
   await plain.unmount()
   await group.unmount()
+})
+
+test('without a price in the config the lines show tokens only', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-06T09:00:00Z') })
+  const { logged } = ecotokensRows(on, [], true, null)
+
+  await $.turn.complete({ answer: 'Done.', durationMs: 5_000, isAborted: false, turnId: 'turn-1', reason: 'answer' })
+  expect(logged).toEqual(['ecotokens · −24.1k tokens (−87 %) · session −312k'])
 })
 
 test('without ecotokens nothing is run and the transcript is left alone', async ($, on) => {

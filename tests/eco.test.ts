@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { callKey, describeJev, describeSaving, ecoLog, groupLine, markLine, matchMarks, turnLine } from '../hooks/eco'
+import { callKey, describeJev, describeSaving, ecoLog, ecoSavedQuery, groupLine, markLine, matchMarks, parsePrice, parseSaved, turnLine } from '../hooks/eco'
 import type { MarkRow } from '../hooks/eco'
 
 test('a saving names its object and its means', () => {
@@ -85,18 +85,32 @@ test('a command cut at 200 characters is matched by its start', () => {
   expect(matchMarks({ calls: [call], claimed: [] }, [short], 2_000).marks).toHaveLength(0)
 })
 
-test('the lines say what was saved, under a call, a group and a turn', () => {
-  expect(markLine({ before: 12_400, after: 1_100, mode: 'summarized' })).toBe('ecotokens · 12.4k → 1.1k (−91 %) · résumé IA')
-  expect(markLine({ before: 1250, after: 75, mode: 'filtered' })).toBe('ecotokens · 1.3k → 75 (−94 %) · filtré')
-  expect(groupLine([{ before: 5000, after: 500, mode: 'filtered' }])).toBe('ecotokens · 1 sortie filtrée · −4.5k tokens')
-  expect(groupLine([{ before: 5000, after: 500, mode: 'filtered' }, { before: 2000, after: 200, mode: 'filtered' }])).toBe(
-    'ecotokens · 2 sorties filtrées · −6.3k tokens',
+test('the lines say only what was saved: tokens, share and avoided cost', () => {
+  expect(markLine({ before: 12_400, after: 1_100, mode: 'summarized' }, 2)).toBe('ecotokens · −11.3k tokens (−91 %) · ≈ $0.02')
+  expect(markLine({ before: 1250, after: 75, mode: 'filtered' })).toBe('ecotokens · −1.2k tokens (−94 %)')
+  // Under a cent, and never $0.00 for a known price.
+  expect(markLine({ before: 1250, after: 75, mode: 'filtered' }, 2)).toBe('ecotokens · −1.2k tokens (−94 %) · < $0.01')
+  expect(groupLine([{ before: 5000, after: 500, mode: 'filtered' }, { before: 2000, after: 200, mode: 'filtered' }], 2)).toBe(
+    'ecotokens · −6.3k tokens (−90 %) · ≈ $0.01',
   )
 
-  const jev = { timestamp: '2026-10-06T09:16:27.735119961+00:00', purpose: 'router', agent: 'router-everyday', ok: 1, error_kind: null, http_status: null, latency_ms: 595, input_tokens: 564, output_tokens: 67, size: 'everyday', confidence: 0.76, followup_prob: 0.1 }
-  const totals = JSON.stringify([{ saved: 24_100, filtered: 3 }])
-  const line = turnLine(ecoLog({ savings: '', totals, jev: JSON.stringify([jev]) }, 0))
-  expect(line).toBe('ecotokens · 3 sorties filtrées · −24.1k tokens · Jev : Message jugé courant (p=0.76) → délégué à router-everyday (Sonnet)')
-  // A turn in which ecotokens did nothing draws nothing.
-  expect(turnLine(ecoLog({ savings: '', totals: JSON.stringify([{ saved: null, filtered: 0 }]), jev: '' }, 0))).toBeUndefined()
+  const turn = { before: 27_700, after: 3_600 }
+  const session = { before: 330_000, after: 18_000 }
+  expect(turnLine(turn, session, 2)).toBe('ecotokens · −24.1k tokens (−87 %) · ≈ $0.05 · session −312k · ≈ $0.62')
+  expect(turnLine(turn, session)).toBe('ecotokens · −24.1k tokens (−87 %) · session −312k')
+  // A turn in which ecotokens saved nothing draws nothing.
+  expect(turnLine({ before: 0, after: 0 }, session, 2)).toBeUndefined()
+})
+
+test('the price comes from the ecotokens config, and is absent when unset or unreadable', () => {
+  expect(parsePrice('{"price_input_usd_per_mtok": 2.0}')).toBe(2)
+  expect(parsePrice('{"other": 1}')).toBeUndefined()
+  expect(parsePrice('{"price_input_usd_per_mtok": null}')).toBeUndefined()
+  expect(parsePrice('not json')).toBeUndefined()
+})
+
+test('the saved totals skip Rewritten rows, as ecotokens gain does', () => {
+  expect(ecoSavedQuery('/home/me', 0, '/p').argv.at(-1)).toContain("mode != 'rewritten'")
+  expect(parseSaved('')).toEqual({ before: 0, after: 0 })
+  expect(parseSaved('[{"before":null,"after":null}]')).toEqual({ before: 0, after: 0 })
 })

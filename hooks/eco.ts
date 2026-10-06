@@ -12,8 +12,9 @@ export type EcoQuery = { argv: string[] }
 
 export type EcoQueries = { savings: EcoQuery; totals: EcoQuery; jev: EcoQuery }
 
+// ecotokens writes while the panel reads: a busy database is waited for (2 s) instead of failing at once.
 function sqlite(db: string, sql: string): EcoQuery {
-  return { argv: ['sqlite3', '-readonly', '-json', db, sql] }
+  return { argv: ['sqlite3', '-readonly', '-json', '-cmd', '.timeout 2000', db, sql] }
 }
 
 // `sqlite3 -json` prints nothing at all for an empty result.
@@ -246,12 +247,6 @@ export function stamp(iso: string) {
 // What the transcript shows under a tool result, and the live line of a turn.
 // ecotokens keeps no tool_use_id: a call and its row meet by command text and by the clock.
 
-const MARK_MODES: Record<string, string> = {
-  filtered: 'filtré',
-  summarized: 'résumé IA',
-  rewritten: 'réécrit',
-}
-
 function squash(command: string) {
   return command.replace(/^bash -c\s+/, '').replace(/\s+/g, ' ').trim()
 }
@@ -281,7 +276,7 @@ export function ecoMarkQuery(home: string, since: number, sessionCwd: string): E
     `${home}/.config/ecotokens/metrics.db`,
     `SELECT id, timestamp, substr(replace(replace(command, char(10), ' '), char(13), ' '), 1, 200) AS command,
             length(command) > 200 AS cut, tokens_before, tokens_after, mode
-       FROM interceptions WHERE ${savedSince(since, sessionCwd)} ORDER BY timestamp LIMIT 300`,
+       FROM interceptions WHERE ${savedSince(since, sessionCwd)} AND mode != 'rewritten' ORDER BY timestamp LIMIT 300`,
   )
 }
 
@@ -327,34 +322,72 @@ export function matchMarks(track: EcoTrack, rows: MarkRow[], now: number) {
   return { track: { calls: waiting, claimed: [...claimed].slice(-200) }, marks }
 }
 
-function plural(n: number, one: string, many: string) {
-  return `${n} ${n > 1 ? many : one}`
+// What the transcript lines show: only the savings, as tokens, a percentage and an avoided cost.
+export type EcoTotals = { before: number; after: number }
+
+// The model input price (USD per million tokens) from ecotokens' config.json: undefined when unset or unusable.
+export function parsePrice(text: string): number | undefined {
+  try {
+    const price = (JSON.parse(text) as { price_input_usd_per_mtok?: unknown }).price_input_usd_per_mtok
+
+    return typeof price === 'number' && Number.isFinite(price) && price > 0 ? price : undefined
+  } catch {
+    return undefined
+  }
 }
 
-// `ecotokens · 12.4k → 1.1k (−91 %) · résumé IA`
-export function markLine(mark: EcoMark) {
-  const pct = mark.before > 0 ? Math.round((1 - mark.after / mark.before) * 100) : 0
+// Same as `ecotokens gain`: tokens saved / 1e6 x the input price.
+function costPart(saved: number, price: number | undefined) {
+  if (price === undefined || saved <= 0) return undefined
+  const usd = (saved / 1_000_000) * price
 
-  return `ecotokens · ${kTokens(mark.before)} → ${kTokens(mark.after)} (−${pct} %) · ${MARK_MODES[mark.mode] ?? mark.mode}`
+  return usd < 0.01 ? '< $0.01' : `≈ $${usd.toFixed(2)}`
+}
+
+function percent(before: number, saved: number) {
+  return before > 0 ? Math.round((saved / before) * 100) : 0
+}
+
+function savingParts(t: EcoTotals, price: number | undefined) {
+  const saved = t.before - t.after
+
+  return [`−${kTokens(saved)} tokens (−${percent(t.before, saved)} %)`, costPart(saved, price)].filter(Boolean) as string[]
+}
+
+function sum(marks: EcoMark[]): EcoTotals {
+  return marks.reduce((t, m) => ({ before: t.before + m.before, after: t.after + m.after }), { before: 0, after: 0 })
+}
+
+// `ecotokens · −11.3k tokens (−91 %) · ≈ $0.02`
+export function markLine(mark: EcoMark, price?: number) {
+  return ['ecotokens', ...savingParts(mark, price)].join(' · ')
 }
 
 // One line under a folded group of tool calls: what ecotokens saved on the ones it touched.
-export function groupLine(marks: EcoMark[]) {
-  const saved = marks.reduce((sum, m) => sum + m.before - m.after, 0)
-
-  return `ecotokens · ${plural(marks.length, 'sortie filtrée', 'sorties filtrées')} · −${kTokens(saved)} tokens`
+export function groupLine(marks: EcoMark[], price?: number) {
+  return ['ecotokens', ...savingParts(sum(marks), price)].join(' · ')
 }
 
-// The line that closes a turn: what ecotokens saved and what Jev decided since the last one.
-export function turnLine(log: EcoLog) {
-  const parts: string[] = []
-  if (log.totalFiltered > 0) {
-    parts.push(`${plural(log.totalFiltered, 'sortie filtrée', 'sorties filtrées')} · −${kTokens(log.totalSaved)} tokens`)
-  }
-  const routed = log.jev.find(c => c.purpose === 'router')
-  const filters = log.jev.filter(c => c.purpose === 'filter_lines').length
-  const jev = [routed?.what, filters > 0 ? plural(filters, 'filtrage IA', 'filtrages IA') : undefined].filter(Boolean)
-  if (jev.length > 0) parts.push(`Jev : ${jev.join(' · ')}`)
+// The rows that saved something since `since` (Rewritten rows excluded, as `ecotokens gain` does), summed.
+export function ecoSavedQuery(home: string, since: number, sessionCwd: string): EcoQuery {
+  return sqlite(
+    `${home}/.config/ecotokens/metrics.db`,
+    `SELECT sum(tokens_before) AS before, sum(tokens_after) AS after
+       FROM interceptions WHERE ${savedSince(since, sessionCwd)} AND mode != 'rewritten'`,
+  )
+}
 
-  return parts.length > 0 ? `ecotokens · ${parts.join(' · ')}` : undefined
+export function parseSaved(stdout: string): EcoTotals {
+  const row = parseRows<{ before: number | null; after: number | null }>(stdout)[0]
+
+  return { before: row?.before ?? 0, after: row?.after ?? 0 }
+}
+
+// The line that closes a turn: savings since the last one, and since the session began.
+export function turnLine(turn: EcoTotals, session: EcoTotals, price?: number) {
+  if (turn.before - turn.after <= 0) return undefined
+  const sessionSaved = session.before - session.after
+  const sessionPart = sessionSaved > 0 ? [`session −${kTokens(sessionSaved)}`, costPart(sessionSaved, price)] : []
+
+  return ['ecotokens', ...savingParts(turn, price), ...sessionPart].filter(Boolean).join(' · ')
 }

@@ -43,8 +43,10 @@ Claude Code ne donne pas de liste des tâches en arrière-plan aux plugins : une
 
 Sans ouvrir le panneau, le plugin écrit aussi dans la conversation, en gris :
 
-- sous le résultat d'un appel d'outil sur lequel ecotokens a économisé des tokens : `ecotokens · 12.4k → 1.1k (−91 %) · résumé IA` (ou `filtré`, `réécrit`). Sous une série d'appels repliée (« Read 3 files »), une ligne donne la somme : `ecotokens · 2 sorties filtrées · −6.3k tokens` ;
-- à la fin de chaque tour de la conversation principale, le bilan depuis le tour précédent et la décision de Jev (ces lignes ne sont que de l'affichage : elles ne sont pas envoyées au modèle) : `ecotokens · 3 sorties filtrées · −24.1k tokens · Jev : Message jugé courant (p=0.76) → délégué à router-everyday (Sonnet)`. Rien n'est écrit quand ecotokens n'a rien fait.
+- sous le résultat d'un appel d'outil sur lequel ecotokens a économisé des tokens : `ecotokens · −11.3k tokens (−91 %) · ≈ $0.02`. Sous une série d'appels repliée (« Read 3 files »), une ligne donne la somme : `ecotokens · −6.3k tokens (−90 %) · ≈ $0.01` ;
+- à la fin de chaque tour de la conversation principale, l'économie depuis le tour précédent, puis le cumul de la session (ces lignes ne sont que de l'affichage : elles ne sont pas envoyées au modèle) : `ecotokens · −24.1k tokens (−87 %) · ≈ $0.05 · session −312k · ≈ $0.62`. Rien n'est écrit quand ecotokens n'a rien économisé pendant le tour.
+
+Les lignes ne montrent que l'économie. Le coût évité est calculé comme `ecotokens gain` : tokens économisés ÷ 1 000 000 × `price_input_usd_per_mtok` de `~/.config/ecotokens/config.json` ; sans ce prix, la partie `≈ $` est omise, et sous un centime elle affiche `< $0.01`. Comme `ecotokens gain`, les lignes en mode « réécrit » ne sont pas comptées.
 
 ecotokens ne note pas l'identifiant de l'appel d'outil : le plugin rapproche un appel (Bash ou Read) de sa ligne dans `metrics.db` par le texte de la commande (ou `Read <fichier>`) et par l'heure. Deux commandes identiques lancées presque ensemble peuvent donc échanger leur ligne. Les sorties des autres outils ne sont pas rapprochées, et un appel d'une série dépliée n'a pas de ligne. Ces lignes sont relues à la fin de chaque appel d'outil (et 4 s plus tard, pour les lectures que résume ecotokens après coup), puis à la fin de chaque tour : pas de minuteur qui tourne en continu. Sans ecotokens (pas de `~/.config/ecotokens/metrics.db`), rien n'est lancé ni affiché.
 
