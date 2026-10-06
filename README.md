@@ -36,6 +36,31 @@ Ouvrez ou fermez le panneau avec le bouton du pied de page ou la commande `/pane
 
 Les onglets se rafraîchissent à leur ouverture, à la fin de chaque tour tant qu'ils sont affichés, et avec `↻`.
 
+### Captures d'écran
+
+<table>
+  <tr>
+    <th>Session</th>
+    <th>Contexte</th>
+    <th>Ecotokens</th>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/session.png" alt="Onglet Session : fenêtre de contexte, quota de l'abonnement, coût équivalent API et handoff" width="280"></td>
+    <td><img src="docs/screenshots/contexte.png" alt="Onglet Contexte : grille de la fenêtre, répartition et cache de la dernière requête" width="280"></td>
+    <td><img src="docs/screenshots/ecotokens.png" alt="Onglet Ecotokens : dernières économies et derniers appels à Jev de la session" width="280"></td>
+  </tr>
+  <tr>
+    <th>Gains</th>
+    <th>Watch</th>
+    <th></th>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/gains.png" alt="Onglet Gains : tokens économisés, détail par famille et usage de Jev du workspace" width="280"></td>
+    <td><img src="docs/screenshots/watch.png" alt="Onglet Watch : état du watcher, journal et autres dossiers surveillés" width="280"></td>
+    <td></td>
+  </tr>
+</table>
+
 ## Développement
 
 Le plugin est un module de hooks TypeScript (`hooks/register.tsx`) chargé directement par Claude Code : il n'y a rien à compiler.
