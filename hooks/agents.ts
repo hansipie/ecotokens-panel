@@ -55,7 +55,9 @@ export function mergeListed(rows: AgentRow[], listed: AgentInfo[], now: number):
   }
   const named = new Set(listed.map(a => a.id))
   for (const r of byId.values()) {
-    if (named.has(r.id) || !r.isListed) continue
+    // A row the engine never named (an agent that ended between two listings) is settled too once its
+    // last run's outcome is known; one without an outcome is a spawn still waiting to be listed.
+    if (named.has(r.id) || (!r.isListed && !(isActive(r.status) && r.outcome))) continue
     const status = isEnded(r.status) ? r.status : (r.outcome ?? r.status)
     byId.set(r.id, { ...r, status, isListed: false, endedAt: r.endedAt ?? (isEnded(status) ? now : undefined) })
   }

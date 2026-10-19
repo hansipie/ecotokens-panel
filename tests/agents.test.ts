@@ -140,6 +140,15 @@ test('an ended agent or task leaves five minutes after it ended, a running or li
   expect(later.tasks.map(t => t.id)).toEqual(['t2'])
 })
 
+test('an agent that ended before the engine ever listed it does not stay running', () => {
+  const spawned = recordSpawn([], SPAWN, { agentId: 'a1' }, 1_000)
+  // Not ended yet and not listed: a spawn waiting to be listed stays running.
+  expect(mergeListed(spawned, [], 1_500)[0]?.status).toBe('running')
+
+  const ended = recordTurn(spawned, { agentId: 'a1', reason: 'answer', durationMs: 1_000, usage: undefined }, 2_000)
+  expect(mergeListed(ended, [], 3_000)[0]).toEqual(expect.objectContaining({ status: 'completed', endedAt: 2_000 }))
+})
+
 const SONNET = { input_tokens: 1_000, output_tokens: 2_000, cache_read_input_tokens: 30_000, cache_creation_input_tokens: 10_000, model: 'claude-sonnet-5-5' }
 
 test('a run uses its model ID and separate cache rates; an unknown model has no price', () => {
