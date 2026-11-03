@@ -160,7 +160,9 @@ type JevRow = {
 function savedSince(startedAt: number, sessionCwd: string) {
   const since = quote(new Date(startedAt).toISOString())
   const cwd = quote(sessionCwd)
-  const inProject = `(git_root IS NULL OR git_root = ${cwd} OR ${cwd} LIKE git_root || '/%')`
+  // Windows paths use `\`: compare on `/` so a sub-folder of the git root still matches.
+  const slashed = (value: string) => `replace(${value}, char(92), '/')`
+  const inProject = `(git_root IS NULL OR ${slashed('git_root')} = ${slashed(cwd)} OR ${slashed(cwd)} LIKE ${slashed('git_root')} || '/%')`
 
   return `timestamp >= ${since} AND tokens_after < tokens_before AND ${inProject}`
 }

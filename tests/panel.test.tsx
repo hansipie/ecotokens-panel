@@ -208,7 +208,7 @@ test('the ecotokens tab lists the session savings and Jev calls', async ($, on) 
     const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface, ...PANE })
     await ui.press({ key: 'tab-eco' })
     expect(queries.some(q => q.startsWith('/home/me/.config/ecotokens/metrics.db') && q.includes("timestamp >= '2026-10-06T08:00:00.000Z'"))).toBe(true)
-    expect(queries.some(q => q.includes("git_root = '/home/me/proj'"))).toBe(true)
+    expect(queries.some(q => q.includes("replace(git_root, char(92), '/') = replace('/home/me/proj', char(92), '/')"))).toBe(true)
     expect(await ui.find({ type: 'Text', text: /18\.5k tokens saved across 20/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '−1.2k tokens (−94%)' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Read file register.tsx' })).toBeDefined()
@@ -249,9 +249,10 @@ test('the EcoTokens tab diagnoses missing Windows data in AppData', async ($, on
 
   const ui = await $.ui.mount({ plugin: 'ecotokens-panel', surface: 'terminal', ...PANE })
   await ui.press({ key: 'tab-eco' })
-  expect(checked).toContain('C:\\Users\\crine\\AppData\\Roaming\\ecotokens\\metrics.db')
-  expect(checked).toContain('C:\\Users\\crine\\AppData\\Roaming\\ecotokens\\config.json')
-  expect(checked).toContain('C:\\Users\\crine\\AppData\\Roaming\\ecotokens\\router.db')
+  // The test host may prefix a drive-letter path with its own cwd (on Linux), so compare the tail.
+  for (const file of ['metrics.db', 'config.json', 'router.db']) {
+    expect(checked.some(p => p.endsWith(`C:\\Users\\crine\\AppData\\Roaming\\ecotokens\\${file}`))).toBe(true)
+  }
   expect(ran).toEqual([])
   expect(await ui.find({ type: 'Text', text: /AppData.*metrics\.db/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /AppData.*config\.json/ })).toBeDefined()

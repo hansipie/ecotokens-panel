@@ -25,7 +25,7 @@ import {
 } from './agents'
 import type { InFlightTask } from './agents'
 import { cells, gradient } from './bar'
-import { callKey, ecoError, ecoLog, ecoMarkQuery, ecoQueries, ecoSavedQuery, familyLabel, groupLine, kTokens, markLine, matchMarks, message, parseRows, parseSaved, resolveEcoRate, stamp, turnLine, MATCH_LEAD_MS } from './eco'
+import { callKey, ecoError, ecoLog, ecoMarkQuery, ecoQueries, ecoSavedQuery, familyLabel, groupLine, kTokens, markLine, matchMarks, message, parsePrice, parseRows, parseSaved, resolveEcoRate, stamp, turnLine, MATCH_LEAD_MS } from './eco'
 import type { EcoQuery, EcoRate, MarkRow } from './eco'
 import { GAIN_PERIODS, gainCommand, jevCommand, parseGain, parseJev, purposeLabel, sparkline } from './gain'
 import { HANDOFF_LIST, HANDOFF_STATUS, handoffToggle, parseHandoff, parseHandoffList } from './handoff'
@@ -136,13 +136,16 @@ async function ecotokensPathEnvironment($: EngineInterface): Promise<EcotokensPa
   const unixType = osType?.toLowerCase() ?? ''
   const isGitBashHome = /^\/[a-z]\//i.test(home ?? '')
   const isPosixHome = home?.startsWith('/') && !isGitBashHome
-  const platform = unixType.includes('linux') || (isPosixHome && !home?.startsWith('/Users/'))
-    ? 'linux'
-    : unixType.includes('darwin') || home?.startsWith('/Users/')
-      ? 'darwin'
-      : os === 'Windows_NT' || appData || userProfile
-        ? 'win32'
-        : 'linux'
+  // An explicit OSTYPE wins; the shape of HOME is only a fallback.
+  const platform = unixType.includes('darwin')
+    ? 'darwin'
+    : unixType.includes('linux')
+      ? 'linux'
+      : isPosixHome
+        ? home?.startsWith('/Users/') ? 'darwin' : 'linux'
+        : os === 'Windows_NT' || appData || userProfile
+          ? 'win32'
+          : 'linux'
 
   return { platform, appData, userProfile, xdgConfigHome }
 }

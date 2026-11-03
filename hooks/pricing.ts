@@ -7,7 +7,7 @@ type ModelPrice = {
   output: number
   cacheRead: number
   cacheWrite: number
-  longContext?: { threshold: number; input: number; cacheRead: number; cacheWrite: number }
+  longContext?: { threshold: number; input: number; output: number; cacheRead: number; cacheWrite: number }
 }
 
 type Usage = {
@@ -28,7 +28,7 @@ const PRICES: readonly ModelPrice[] = [
     output: 0.5,
     cacheRead: 0.01,
     cacheWrite: 0.125,
-    longContext: { threshold: 100_000, input: 0.5, cacheRead: 0.05, cacheWrite: 0.625 },
+    longContext: { threshold: 100_000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },
   },
   { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
   { id: 'claude-opus-5', label: 'Claude Opus 5', input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
@@ -47,11 +47,14 @@ const PRICES: readonly ModelPrice[] = [
   { id: 'claude-haiku-3', label: 'Claude Haiku 3', input: 0.25, output: 1.25, cacheRead: 0.03, cacheWrite: 0.3 },
 ]
 
+// The ID must stand alone: not glued to more version digits (`claude-sonnet-5-50`),
+// nor followed by `-<digit>` unless that is a dated snapshot (`-20251001`).
+// Provider prefixes (`us.anthropic.`) and suffixes (`-v1:0`, `[1m]`, `-latest`) stay accepted.
 function modelPrice(model?: string) {
   if (!model) return undefined
   const normalized = model.trim().toLowerCase().replace(/[._\s]+/g, '-')
 
-  return PRICES.find(price => normalized.includes(price.id))
+  return PRICES.find(price => new RegExp(`(?:^|[^a-z0-9])${price.id}(?:$|-\\d{8}(?!\\d)|-(?!\\d)|[^a-z0-9-])`).test(normalized))
 }
 
 function rates(price: ModelPrice, inputTokens?: number) {
@@ -59,7 +62,7 @@ function rates(price: ModelPrice, inputTokens?: number) {
   if (inputTokens === undefined || !Number.isFinite(inputTokens)) return undefined
 
   return inputTokens > price.longContext.threshold
-    ? { ...price, input: price.longContext.input, cacheRead: price.longContext.cacheRead, cacheWrite: price.longContext.cacheWrite }
+    ? { ...price, input: price.longContext.input, output: price.longContext.output, cacheRead: price.longContext.cacheRead, cacheWrite: price.longContext.cacheWrite }
     : price
 }
 

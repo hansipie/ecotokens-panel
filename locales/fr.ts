@@ -66,7 +66,7 @@ export const fr = {
   'panel.ecoSessionSummary': 'Session : {saved} {unit} économisés sur {filtered} sorties filtrées',
   'setup.metricsMissing': 'Base de mesures ecotokens introuvable à {path}. Exécutez `ecotokens doctor`, puis une commande interceptée pour produire des mesures.',
   'setup.configMissing': 'Configuration ecotokens absente à {path} ; les valeurs par défaut sont utilisées.',
-  'setup.priceMissing': 'Aucun tarif d’entrée du modèle n’est défini ; les estimations de coût évité sont indisponibles. Définissez les tarifs avec `ecotokens gain price --input <USD par million> --output <USD par million>`.',
+  'setup.priceMissing': 'Aucun tarif global EcoTokens n’est défini : les lignes de la conversation utilisent le tarif API du modèle actif, mais les gains historiques n’affichent pas de coût. Définissez un tarif global avec `ecotokens gain price --input <USD par million> --output <USD par million>`.',
   'setup.readHelp': 'Vérifiez que sqlite3 est dans le PATH, puis exécutez `ecotokens doctor`.',
   'panel.latestSavings': '5 dernières économies',
   'panel.noneYet': 'Aucune pour l’instant.',
