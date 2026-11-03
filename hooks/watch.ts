@@ -1,4 +1,6 @@
 import type { WatchEntry, WatchState } from '../types'
+import { formatClock, t as tr } from './i18n'
+import { samePath } from './paths'
 
 // ecotokens' background index watcher. `--status --json` lists every watched directory;
 // it exits 1 (« no background process running ») when there is none, which is not an error here.
@@ -13,8 +15,16 @@ export function watchStop(path: string) {
   return ['ecotokens', 'watch', '--stop', '--path', path]
 }
 
-export function watchLogTail(logFile: string, lines = 8) {
-  return ['tail', '-n', String(lines), logFile]
+// The Claude plugin runtime exposes file reads through $.fs rather than Node built-ins.
+export function tailLogContents(contents: string, lines = 8) {
+  const offset = Math.max(0, contents.length - 256 * 1024)
+  let text = contents.slice(offset)
+  if (offset > 0) {
+    const firstLineBreak = text.indexOf('\n')
+    if (firstLineBreak >= 0) text = text.slice(firstLineBreak + 1)
+  }
+
+  return text.split(/\r?\n/).filter(line => line.trim() !== '').slice(-Math.max(1, lines)).join('\n')
 }
 
 type StatusJson = { sessions?: unknown; watcher_pid?: unknown; log_file?: unknown; started_at?: unknown }
@@ -23,7 +33,7 @@ type StatusJson = { sessions?: unknown; watcher_pid?: unknown; log_file?: unknow
 export function parseWatch(stdout: string, ok: boolean, cwd: string, now: number): WatchState {
   const map = ok ? (JSON.parse(stdout) as unknown) : {}
   if (typeof map !== 'object' || map === null || Array.isArray(map)) {
-    throw new Error('réponse inattendue de ecotokens watch --status')
+    throw new Error(tr('parse.unexpectedWatchStatus'))
   }
 
   const entries: WatchEntry[] = Object.entries(map as Record<string, StatusJson>).map(([path, e]) => ({
@@ -36,8 +46,8 @@ export function parseWatch(stdout: string, ok: boolean, cwd: string, now: number
 
   return {
     cwd,
-    current: entries.find(en => en.path === cwd && en.pid !== undefined),
-    others: entries.filter(en => en.path !== cwd && en.pid !== undefined),
+    current: entries.find(en => samePath(en.path, cwd) && en.pid !== undefined),
+    others: entries.filter(en => !samePath(en.path, cwd) && en.pid !== undefined),
     log: [],
     measuredAt: now,
   }
@@ -48,5 +58,9 @@ export function parseLogTail(stdout: string) {
   return stdout
     .split('\n')
     .filter(l => l.trim() !== '')
-    .map(l => l.replace(/^\[\d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2})\]\s*/, '$1 '))
+    .map(l =>
+      l.replace(/^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\]\s*/, (_match, date: string, time: string) =>
+        `${formatClock(new Date(`${date}T${time}`))} `,
+      ),
+    )
 }

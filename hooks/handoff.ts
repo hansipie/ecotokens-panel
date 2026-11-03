@@ -1,4 +1,6 @@
 import type { HandoffEntry, HandoffState } from '../types'
+import { t as tr } from './i18n'
+import { samePath } from './paths'
 
 // ecotokens' session handoff: `ecotokens handoff status --json` reports it,
 // `on` / `off` install or remove its hook and skills. Saving a state is the `/handoff` skill's job
@@ -29,7 +31,7 @@ const num = (v: unknown) => (typeof v === 'number' ? v : 0)
 
 export function parseHandoff(stdout: string, now: number): HandoffState {
   const j = JSON.parse(stdout) as StatusJson
-  if (typeof j.enabled !== 'boolean') throw new Error('réponse inattendue de ecotokens handoff status')
+  if (typeof j.enabled !== 'boolean') throw new Error(tr('parse.unexpectedHandoffStatus'))
 
   return {
     enabled: j.enabled,
@@ -59,10 +61,10 @@ export function oneLine(text: string, max = 80) {
 // Rows for `cwd` only (a row without a cwd is kept), the newest first as ecotokens lists them.
 export function parseHandoffList(stdout: string, cwd?: string): HandoffEntry[] {
   const rows = JSON.parse(stdout) as unknown
-  if (!Array.isArray(rows)) throw new Error('réponse inattendue de ecotokens handoff list')
+  if (!Array.isArray(rows)) throw new Error(tr('parse.unexpectedHandoffList'))
 
   return (rows as ListJson[])
-    .filter(r => typeof r?.id === 'string' && (cwd === undefined || typeof r.cwd !== 'string' || r.cwd === cwd))
+    .filter(r => typeof r?.id === 'string' && (cwd === undefined || typeof r.cwd !== 'string' || samePath(r.cwd, cwd)))
     .map(r => ({
       id: r.id as string,
       ageHours: num(r.age_hours),

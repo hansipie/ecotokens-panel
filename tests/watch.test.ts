@@ -1,6 +1,9 @@
 import { expect, test } from 'claude-code/testing'
+import { configureLocale } from '../hooks/i18n'
 
-import { parseLogTail, parseWatch, watchLogTail, watchStart, watchStop } from '../hooks/watch'
+configureLocale({ ECOTOKENS_PANEL_LANG: 'fr' })
+
+import { parseLogTail, parseWatch, tailLogContents, watchStart, watchStop } from '../hooks/watch'
 
 test('the status JSON splits this directory from the others', () => {
   const json = JSON.stringify({
@@ -24,7 +27,11 @@ test('a failed status means nothing runs', () => {
 test('the controls always name the directory', () => {
   expect(watchStart('/p')).toEqual(['ecotokens', 'watch', '--background', '--path', '/p'])
   expect(watchStop('/p')).toEqual(['ecotokens', 'watch', '--stop', '--path', '/p'])
-  expect(watchLogTail('/l/p.log', 3)).toEqual(['tail', '-n', '3', '/l/p.log'])
+})
+
+test('the log tail can be prepared from the plugin file API on every OS', () => {
+  expect(tailLogContents('one\ntwo\nthree\n', 2)).toBe('two\nthree')
+  expect(tailLogContents('')).toBe('')
 })
 
 test('the log keeps the time of each line', () => {

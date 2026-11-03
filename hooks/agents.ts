@@ -1,19 +1,21 @@
 import type { AgentInfo, AgentSpawnInput, TurnCompleteInput } from 'claude-code'
 
 import { kTokens } from './eco'
+import { runCost } from './pricing'
 import type { AgentRow, AgentRunStatus, TaskRow, TaskRunStatus } from '../types'
+import { formatInteger, formatNumber, formatUsd, t as tr, tp } from './i18n'
 
 // What the Agents tab keeps: the newest rows, the running ones first.
 const MAX_ROWS = 30
 
-export const AGENT_STATUS: Record<AgentRunStatus, { glyph: string; label: string; color?: string }> = {
-  pending: { glyph: '◌', label: 'pas démarré' },
-  running: { glyph: '●', label: 'en cours', color: 'claude' },
-  waiting: { glyph: '◌', label: 'en attente', color: 'warning' },
-  idle: { glyph: '○', label: 'inactif' },
-  completed: { glyph: '✓', label: 'terminé', color: 'success' },
-  failed: { glyph: '✗', label: 'échoué', color: 'error' },
-  killed: { glyph: '■', label: 'arrêté', color: 'warning' },
+export const AGENT_STATUS: Record<AgentRunStatus, { glyph: string; label: Parameters<typeof tr>[0]; color?: string }> = {
+  pending: { glyph: '◌', label: 'status.agent.pending' },
+  running: { glyph: '●', label: 'status.agent.running', color: 'claude' },
+  waiting: { glyph: '◌', label: 'status.agent.waiting', color: 'warning' },
+  idle: { glyph: '○', label: 'status.agent.idle' },
+  completed: { glyph: '✓', label: 'status.agent.completed', color: 'success' },
+  failed: { glyph: '✗', label: 'status.agent.failed', color: 'error' },
+  killed: { glyph: '■', label: 'status.agent.killed', color: 'warning' },
 }
 
 export function isActive(status: AgentRunStatus) {
@@ -92,16 +94,6 @@ export function recordToolUse(rows: AgentRow[], agentId: string, tool: string): 
   return rows.map(r => (r.id === agentId ? { ...r, toolUses: r.toolUses + 1, lastTool: tool } : r))
 }
 
-// USD per million tokens by model family: input, output, cache read, cache write (5-minute). The engine
-// gives no cost per run and no price list, so these are the list prices of the current models as the
-// Claude API reference gives them (2026-09): approximate, to be kept up to date by hand.
-const PRICES: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
-  haiku: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
-  sonnet: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
-  opus: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
-  fable: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
-}
-
 type RunUsage = {
   input_tokens: number
   output_tokens: number
@@ -110,23 +102,11 @@ type RunUsage = {
   model?: string
 }
 
-// What one run cost, in USD; undefined for a model of a family the table does not know.
-export function runCost(usage: RunUsage | undefined): number | undefined {
-  const family = Object.keys(PRICES).find(f => usage?.model?.includes(f))
-  const price = family ? PRICES[family] : undefined
-  if (!usage || !price) return undefined
-
-  return (
-    (usage.input_tokens * price.input +
-      usage.output_tokens * price.output +
-      usage.cache_read_input_tokens * price.cacheRead +
-      usage.cache_creation_input_tokens * price.cacheWrite) /
-    1_000_000
-  )
-}
+// What one run cost, in USD; unknown or unsupported models remain unpriced.
+export { runCost }
 
 export function costLabel(usd: number) {
-  return usd < 0.005 ? '< $0.01' : `≈ $${usd.toFixed(2)}`
+  return usd < 0.005 ? `< ${formatUsd(0.01)}` : `≈ ${formatUsd(usd)}`
 }
 
 // The line under a delegated run (a `router-*` subagent) that ended; undefined for any other agent.
@@ -136,9 +116,9 @@ export function delegationLine(type: string, usage: RunUsage | undefined) {
   const input = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
 
   return [
-    'délégation',
+    tr('agent.delegation'),
     `${type}${usage.model ? ` (${shortModel(usage.model)})` : ''}`,
-    `${kTokens(input)} → ${kTokens(usage.output_tokens)} tokens`,
+    `${kTokens(input)} → ${kTokens(usage.output_tokens)} ${tr('unit.tokens')}`,
     cost === undefined ? '' : costLabel(cost),
   ]
     .filter(Boolean)
@@ -181,16 +161,16 @@ export function recordTurn(
 
 export function durationLabel(ms: number) {
   const s = Math.max(0, Math.round(ms / 1000))
-  if (s < 60) return `${s} s`
+  if (s < 60) return tp('duration.seconds', s)
   const m = Math.floor(s / 60)
-  if (m < 60) return `${m} min ${String(s % 60).padStart(2, '0')} s`
+  if (m < 60) return tr('duration.minutesSeconds', { minutes: formatNumber(m), seconds: formatInteger(s % 60, 2) })
 
-  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`
+  return tr('duration.hoursMinutes', { hours: formatNumber(Math.floor(m / 60)), minutes: formatInteger(m % 60, 2) })
 }
 
 // While it runs: the time since it started. Once it ended: its last run's length.
 export function elapsedLabel(r: AgentRow, now: number) {
-  if (isActive(r.status)) return r.startedAt === undefined ? '' : `depuis ${durationLabel(now - r.startedAt)}`
+  if (isActive(r.status)) return r.startedAt === undefined ? '' : tr('duration.since', { duration: durationLabel(now - r.startedAt) })
   if (r.durationMs !== undefined) return durationLabel(r.durationMs)
 
   return r.startedAt !== undefined && r.endedAt !== undefined ? durationLabel(r.endedAt - r.startedAt) : ''
@@ -205,22 +185,22 @@ export function shortModel(model: string) {
 // seen starting in its tool's result (Bash's `backgroundTaskId`, Monitor's `taskId`), stopped by
 // TaskStop, and the classic Stop events carry what is still in flight, so a task missing there has ended.
 
-export const TASK_STATUS: Record<TaskRunStatus, { glyph: string; label: string; color?: string }> = {
-  pending: { glyph: '◌', label: 'pas démarré' },
-  running: { glyph: '●', label: 'en cours', color: 'claude' },
-  ended: { glyph: '◇', label: 'terminé' },
-  killed: { glyph: '■', label: 'arrêté', color: 'warning' },
+export const TASK_STATUS: Record<TaskRunStatus, { glyph: string; label: Parameters<typeof tr>[0]; color?: string }> = {
+  pending: { glyph: '◌', label: 'status.task.pending' },
+  running: { glyph: '●', label: 'status.task.running', color: 'claude' },
+  ended: { glyph: '◇', label: 'status.task.ended' },
+  killed: { glyph: '■', label: 'status.task.killed', color: 'warning' },
 }
 
-const TASK_KINDS: Record<string, string> = {
-  shell: 'Shell',
-  monitor: 'Monitor',
-  workflow: 'Workflow',
-  remote_agent: 'Agent distant',
+const TASK_KINDS: Record<string, Parameters<typeof tr>[0]> = {
+  shell: 'task.kind.shell',
+  monitor: 'task.kind.monitor',
+  workflow: 'task.kind.workflow',
+  remote_agent: 'task.remoteAgent',
 }
 
 export function taskKindLabel(kind: string) {
-  return TASK_KINDS[kind] ?? kind
+  return TASK_KINDS[kind] ? tr(TASK_KINDS[kind]) : kind
 }
 
 export const isTaskActive = (status: TaskRunStatus) => status === 'pending' || status === 'running'
@@ -302,7 +282,7 @@ export function pruneEnded(s: { rows: AgentRow[]; tasks: TaskRow[] }, now: numbe
 
 export function taskElapsedLabel(t: TaskRow, now: number) {
   if (t.startedAt === undefined) return ''
-  if (isTaskActive(t.status)) return `depuis ${durationLabel(now - t.startedAt)}`
+  if (isTaskActive(t.status)) return tr('duration.since', { duration: durationLabel(now - t.startedAt) })
   if (t.endedAt === undefined) return ''
 
   return `${t.isEndApprox ? '≤ ' : ''}${durationLabel(t.endedAt - t.startedAt)}`

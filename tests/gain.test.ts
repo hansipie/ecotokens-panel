@@ -1,4 +1,7 @@
 import { expect, test } from 'claude-code/testing'
+import { configureLocale } from '../hooks/i18n'
+
+configureLocale({ ECOTOKENS_PANEL_LANG: 'fr' })
 
 import { gainCommand, jevCommand, parseGain, parseJev, sparkline } from '../hooks/gain'
 
