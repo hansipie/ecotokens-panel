@@ -188,12 +188,21 @@ export type HandoffState = {
   measuredAt: number
 }
 
+export type EcoSetup = {
+  metricsPath: string
+  metricsAvailable: boolean
+  configPath: string
+  configAvailable: boolean
+  priceConfigured: boolean
+}
+
 export type EcoLog = {
   savings: EcoSaving[]
   jev: EcoJevCall[]
   totalSaved: number
   totalFiltered: number
   error?: string
+  setup?: EcoSetup
   measuredAt: number
 }
 

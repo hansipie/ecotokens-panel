@@ -1,12 +1,13 @@
 import type { GainPeriod, GainReport, GainRow, JevPurpose, JevReport } from '../types'
+import { t as tr } from './i18n'
 
 // `ecotokens gain` and `ecotokens jev` report over a period, held to one project with --project
 // (a directory inside it: ecotokens keys projects by git root).
-export const GAIN_PERIODS: { id: GainPeriod; label: string }[] = [
-  { id: 'today', label: 'Jour' },
-  { id: 'week', label: 'Semaine' },
-  { id: 'month', label: 'Mois' },
-  { id: 'all', label: 'Tout' },
+export const GAIN_PERIODS: { id: GainPeriod; labelKey: Parameters<typeof tr>[0] }[] = [
+  { id: 'today', labelKey: 'gain.period.today' },
+  { id: 'week', labelKey: 'gain.period.week' },
+  { id: 'month', labelKey: 'gain.period.month' },
+  { id: 'all', labelKey: 'gain.period.all' },
 ]
 
 export function gainCommand(period: GainPeriod, project: string) {
@@ -21,7 +22,7 @@ const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0
 
 function object(stdout: string, what: string) {
   const j = JSON.parse(stdout) as unknown
-  if (typeof j !== 'object' || j === null || Array.isArray(j)) throw new Error(`réponse inattendue de ecotokens ${what}`)
+  if (typeof j !== 'object' || j === null || Array.isArray(j)) throw new Error(tr('parse.unexpectedEco', { command: what }))
 
   return j as Record<string, unknown>
 }
@@ -97,11 +98,15 @@ export function sparkline(values: number[], width: number) {
 }
 
 // What Jev was asked to do, in the panel's words.
-export const PURPOSE_LABELS: Record<string, string> = {
-  router: 'Routage des messages',
-  filter_lines: 'Filtrage de sorties',
-  classify: 'Classification',
-  code_gate: 'Contrôle de code',
-  verify: 'Vérification',
-  other: 'Autre',
+const PURPOSE_KEYS: Record<string, Parameters<typeof tr>[0]> = {
+  router: 'purpose.router',
+  filter_lines: 'purpose.filterLines',
+  classify: 'purpose.classify',
+  code_gate: 'purpose.codeGate',
+  verify: 'purpose.verify',
+  other: 'purpose.other',
+}
+
+export function purposeLabel(purpose: string) {
+  return PURPOSE_KEYS[purpose] ? tr(PURPOSE_KEYS[purpose]) : purpose
 }
